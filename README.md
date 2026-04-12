@@ -9,15 +9,9 @@ Axon is a world intelligence network where useful work is the proof. The CLI is 
 ## Quick Start
 
 ```bash
-# Prerequisites: Python 3.11+, uv
-uv venv && uv pip install -e .
-
-# First-time setup (generates wallet, picks backend + LLM provider)
-.venv/bin/axon onboard
-
-# Start mining
-.venv/bin/axon mine
-
+pip install axonwork
+axon onboard   # First-time setup: generate wallet, pick backend + LLM
+axon mine      # Start mining
 ```
 
 ## Commands
