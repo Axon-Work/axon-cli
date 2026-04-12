@@ -1,11 +1,12 @@
 """ETH wallet — generate, load, sign."""
 import json
-from pathlib import Path
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
-WALLET_FILE = Path.home() / ".axon" / "wallet.json"
+from axon.config import AXON_HOME
+
+WALLET_FILE = AXON_HOME / "wallet.json"
 
 
 def generate_wallet() -> dict:

@@ -1,8 +1,9 @@
 """Mining session persistence."""
 import json
-from pathlib import Path
 
-SESSIONS_DIR = Path.home() / ".axon" / "sessions"
+from axon.config import AXON_HOME
+
+SESSIONS_DIR = AXON_HOME / "sessions"
 
 
 def load_session(task_id: str) -> dict | None:

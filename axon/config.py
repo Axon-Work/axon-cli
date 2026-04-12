@@ -1,7 +1,9 @@
 import json
+import os
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".axon"
+AXON_HOME = Path(os.environ.get("AXON_HOME", str(Path.home() / ".axon")))
+CONFIG_DIR = AXON_HOME
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
@@ -10,7 +12,23 @@ DEFAULT_CONFIG = {
     "default_model": "anthropic/claude-sonnet-4-20250514",
     "api_base": "",
     "api_keys": {},
+    "backend": "auto",
+    "cli_timeout": 600,
+    "claude_cli_model": "",
+    "codex_cli_model": "",
 }
+
+
+def resolve_cli_timeout(config: dict, default: int = 600) -> int | None:
+    """Return CLI backend timeout in seconds, or None when disabled."""
+    raw_timeout = config.get("cli_timeout", default)
+    if raw_timeout is None:
+        return None
+    try:
+        timeout = int(raw_timeout)
+    except (TypeError, ValueError):
+        return default
+    return None if timeout <= 0 else timeout
 
 
 def load_config() -> dict:

@@ -1,19 +1,55 @@
-"""Mining loop — KeyWatcher, MiningDisplay, and run_mining."""
+"""Mining loop — KeyWatcher, MiningDisplay, and run_mining (multi-task model)."""
 import sys
 import time
 import logging
+from datetime import datetime
+from pathlib import Path
 
 import httpx
 from rich.live import Live
 
 from axon.api import api_get, api_post
-from axon.config import load_config
-from axon.display import console, build_mining_panel, fmt_round, print_mining_summary
-from axon.llm import build_prompt, call_llm
+from axon.backends import create_backend
+from axon.config import AXON_HOME, load_config
+from axon.display import console, build_mining_panel, fmt_round, print_mining_summary, _fmt_usdc
+from axon.history import merge_server_history, build_local_record, build_error_record, append_record
+from axon.llm import build_prompt, build_agent_prompt
 from axon.session import load_session, save_session, delete_session
 
 
 log = logging.getLogger("axon.mine")
+PROMPT_LOG_DIR = AXON_HOME / "logs" / "prompts"
+_UNSET = object()
+
+
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _write_prompt_snapshot(task_id: str, round_num: int, prompt: str) -> Path | None:
+    try:
+        PROMPT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        path = PROMPT_LOG_DIR / f"{task_id}-round{round_num:03d}-{stamp}.txt"
+        path.write_text(prompt, encoding="utf-8")
+        return path
+    except Exception:
+        log.exception("Failed to write prompt snapshot task=%s round=%d", task_id, round_num)
+        return None
+
+
+def _usage_tokens(usage: dict) -> int | None:
+    value = usage.get("tokens", usage.get("total_tokens"))
+    return value if value is not None else None
+
+
+def _usage_cost_usd(usage: dict) -> float | None:
+    value = usage.get("cost_usd", usage.get("cost"))
+    return value if value is not None else None
+
+
+def _usage_billing_mode(usage: dict, backend_name: str) -> str:
+    return usage.get("billing_mode") or ("subscription" if backend_name in ("codex-cli", "claude-cli") else "metered")
 
 
 class KeyWatcher:
@@ -96,22 +132,39 @@ class MiningDisplay:
         self.total_earned: int = 0
         self.round_count: int = 0
         self.status: str = ""
-        self.total_tokens: int = 0
-        self.total_cost: float = 0.0
+        self.total_tokens: int | None = 0
+        self.total_cost: float | None = 0.0
+        self.billing_mode: str = "metered"
         self.rounds: list[dict] = []
         self.all_details: list[dict] = []
+        self.community_subs: list[dict] = []
+        self.my_miner_id: str = ""
+        self.call_started_at: float | None = None
 
     def __rich_console__(self, rconsole, options):
-        # Pick detail by watcher index
+        # Append elapsed time to status if LLM call is in progress
+        status = self.status
+        if self.call_started_at is not None:
+            elapsed = int(time.monotonic() - self.call_started_at)
+            status = f"{status} ({elapsed}s)"
+
+        # Pick detail by watcher index, clamping to valid range
         idx = self._watcher.detail_idx
-        detail = self.all_details[idx] if 0 <= idx < len(self.all_details) else None
+        if self.all_details:
+            if idx < 0 or idx >= len(self.all_details):
+                idx = len(self.all_details) - 1
+            detail = self.all_details[idx]
+        else:
+            detail = None
         detail_nav = (idx + 1, len(self.all_details)) if self.all_details else None
         yield build_mining_panel(
             self.task_title, self.model, self.pool,
             self.threshold, self.best_score, self.total_earned,
-            self.round_count, self.status, self._watcher.show_details,
+            self.round_count, status, self._watcher.show_details,
             detail, self.rounds, detail_nav,
-            total_tokens=self.total_tokens, total_cost=self.total_cost,
+            total_tokens=self.total_tokens, total_cost=self.total_cost, billing_mode=self.billing_mode,
+            community_subs=self.community_subs,
+            my_miner_id=self.my_miner_id,
         )
 
     def __rich_measure__(self, rconsole, options):
@@ -119,24 +172,46 @@ class MiningDisplay:
         return Measurement(40, options.max_width)
 
 
-def run_mining(task_id: str, max_rounds: int):
+def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None | object = _UNSET):
     """Mining loop: rounds scroll above, status panel stays at bottom."""
-    task = api_get(f"/api/tasks/{task_id}", auth=False)
-    best_info = api_get(f"/api/tasks/{task_id}/submissions/best")
     config = load_config()
+    backend_config = dict(config)
+    if cli_timeout_override is not _UNSET:
+        backend_config["cli_timeout"] = cli_timeout_override
+    backend = create_backend(backend_config.get("backend", "litellm"), backend_config)
     model_name = config.get("default_model", "anthropic/claude-sonnet-4-20250514")
-    api_base = config.get("api_base", "")
+
+    task_id = task["id"]
+    timeout_label = "none" if cli_timeout_override is None else (
+        backend_config.get("cli_timeout") if cli_timeout_override is not _UNSET else config.get("cli_timeout", "")
+    )
+    log.info(
+        "Mining config task=%s backend=%s max_rounds=%s cli_timeout=%s",
+        task_id,
+        backend.display_name(),
+        "unlimited" if max_rounds <= 0 else max_rounds,
+        timeout_label,
+    )
+
+    # Get best info
+    try:
+        best_info = api_get(f"/api/tasks/{task_id}/submissions/best", auth=False)
+    except Exception:
+        best_info = {}
 
     my_best_answer = None
     my_best_score = None
     round_num = 0
     total_earned = 0
-    total_tokens = 0
-    total_cost = 0.0
+    total_tokens: int | None = 0
+    total_cost: float | None = 0.0
     rounds_data: list[dict] = []
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 5
 
-    # Restore session
-    session = load_session(task_id)
+    # Restore session (keyed by task_id)
+    session_key = f"task-{task_id}"
+    session = load_session(session_key)
     if session:
         my_best_answer = session.get("my_best_answer")
         my_best_score = session.get("my_best_score")
@@ -147,17 +222,33 @@ def run_mining(task_id: str, max_rounds: int):
     watcher = KeyWatcher()
     state = MiningDisplay(watcher)
     state.task_title = task["title"]
-    state.model = model_name
-    state.pool = task["pool_balance"]
-    state.threshold = task["completion_threshold"]
+    state.model = backend.display_name()
+    state.pool = task.get("pool_balance", 0)
+    state.threshold = task.get("completion_threshold", 0)
     state.best_score = my_best_score
     state.total_earned = total_earned
     state.round_count = round_num
-    state.rounds = rounds_data  # shared reference — appends are visible to panel
+    state.rounds = rounds_data
+    state.billing_mode = "subscription" if backend.name in ("codex-cli", "claude-cli") else "metered"
+
+    # Get my miner ID for community leaderboard highlighting
+    try:
+        me_info = api_get("/api/auth/me")
+        state.my_miner_id = str(me_info.get("id", ""))
+    except Exception:
+        state.my_miner_id = ""
+
+    # Load local history + merge server submissions (dedup)
+    server_subs = []
+    try:
+        server_subs = api_get(f"/api/tasks/{task_id}/submissions/mine")
+    except Exception:
+        pass
+    my_past_subs = merge_server_history(task_id, server_subs)
 
     last_feedback = None
     consecutive_dups = 0
-    threshold = task["completion_threshold"]
+    threshold = task.get("completion_threshold", 0)
 
     # Save terminal settings for cleanup
     old_tty = None
@@ -177,44 +268,114 @@ def run_mining(task_id: str, max_rounds: int):
                 if max_rounds > 0 and round_num > max_rounds:
                     break
 
-                # Already reached threshold — nothing more to do
-                if my_best_score is not None and my_best_score >= threshold:
-                    state.status = "[bold green]✓ Threshold reached![/]"
-                    time.sleep(1)
-                    break
-
-                # LLM stuck generating same answers
+                # LLM stuck
                 if consecutive_dups >= 3:
-                    console.print("  [yellow]3 consecutive duplicates — LLM has no new ideas. Stopping.[/]")
+                    console.print("  [yellow]3 consecutive duplicates — stopping.[/]")
                     break
 
                 state.round_count = round_num
-                state.status = f"[dim]► R{round_num}  calling LLM...[/]"
+                state.status = f"[dim]► Round {round_num}  calling {backend.display_name()}...[/]"
+                round_started_at = _now_iso()
+                round_started_mono = time.monotonic()
+                log.info(
+                    "Round %d start task=%s title=%r backend=%s started_at=%s",
+                    round_num,
+                    task_id,
+                    task.get("title", ""),
+                    backend.display_name(),
+                    round_started_at,
+                )
 
-                # --- Call LLM ---
+                # --- Call Backend ---
                 try:
-                    prompt = build_prompt(task, my_best_answer, my_best_score, best_info.get("score"), last_feedback)
-                    thinking, answer, usage = call_llm(prompt, model_name, api_base)
-                    total_tokens += usage.get("total_tokens", 0)
-                    total_cost += usage.get("cost", 0.0)
+                    # Fetch community submissions for context
+                    try:
+                        all_subs = api_get(f"/api/tasks/{task_id}/submissions?limit=10", auth=False)
+                        community_subs = [s for s in all_subs if s.get("score") is not None and s.get("is_improvement")]
+                        community_subs.sort(key=lambda s: s.get("score", 0), reverse=(task.get("direction") == "maximize"))
+                    except Exception:
+                        all_subs = []
+                        community_subs = []
+
+                    state.community_subs = community_subs
+
+                    if backend.name == "litellm":
+                        prompt = build_prompt(task, my_best_answer, my_best_score, best_info.get("score"), last_feedback, community_subs=community_subs, my_past_subs=my_past_subs)
+                    else:
+                        prompt = build_agent_prompt(task, my_best_answer, my_best_score, best_info.get("score"), last_feedback, community_subs=community_subs, my_past_subs=my_past_subs)
+
+                    prompt_path = _write_prompt_snapshot(task_id, round_num, prompt)
+                    log.info(
+                        "Round %d prompt task=%s chars=%d lines=%d community_subs=%d my_past_subs=%d path=%s",
+                        round_num,
+                        task_id,
+                        len(prompt),
+                        prompt.count("\n") + 1 if prompt else 0,
+                        len(community_subs),
+                        len(my_past_subs),
+                        str(prompt_path) if prompt_path else "",
+                    )
+                    state.call_started_at = time.monotonic()
+                    result = backend.call(prompt, task)
+                    state.call_started_at = None
+                    thinking, answer, usage = result["thinking"], result["answer"], result["usage"]
+                    billing_mode = _usage_billing_mode(usage, backend.name)
+                    state.billing_mode = billing_mode
+                    tokens_used = _usage_tokens(usage)
+                    cost_usd = _usage_cost_usd(usage)
+                    if billing_mode == "metered":
+                        total_tokens = (total_tokens or 0) + (tokens_used or 0)
+                        total_cost = (total_cost or 0.0) + (cost_usd or 0.0)
+                    else:
+                        total_tokens = None
+                        total_cost = None
                     state.total_tokens = total_tokens
                     state.total_cost = total_cost
+                    log.info(
+                        "Round %d backend_done task=%s finished_at=%s duration_s=%.2f answer_chars=%d thinking_chars=%d billing_mode=%s total_tokens=%s cost_usd=%s",
+                        round_num,
+                        task_id,
+                        _now_iso(),
+                        time.monotonic() - round_started_mono,
+                        len(answer or ""),
+                        len(thinking or ""),
+                        billing_mode,
+                        tokens_used,
+                        cost_usd,
+                    )
                 except Exception as e:
+                    state.call_started_at = None
+                    consecutive_errors += 1
+                    record = build_error_record(task_id, None, None, None, None, round_num, state.billing_mode, "crash", str(e))
+                    append_record(task_id, record)
                     rounds_data.append({"round": round_num, "score": None, "result": "crash", "earned": 0})
                     state.all_details.append({"score": None, "result": "crash", "earned": 0,
                                               "error": str(e), "eval_details": None, "answer": None, "thinking": None})
                     watcher.detail_count = len(state.all_details)
                     state.status = ""
-                    log.error("LLM error round %d: %s", round_num, e, exc_info=True)
-                    time.sleep(2)
+                    log.error(
+                        "Round %d backend_error task=%s finished_at=%s duration_s=%.2f error=%s",
+                        round_num,
+                        task_id,
+                        _now_iso(),
+                        time.monotonic() - round_started_mono,
+                        e,
+                        exc_info=True,
+                    )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                        break
+                    sleep_time = 10 if isinstance(e, TimeoutError) else 2
+                    time.sleep(sleep_time)
                     continue
 
-                state.status = f"[dim]► R{round_num}  submitting...[/]"
+                state.status = f"[dim]► Round {round_num}  submitting...[/]"
 
-                # --- Submit ---
+                # --- Submit to task ---
+                thinking = thinking or "(no reasoning provided)"
                 try:
                     sub = api_post(f"/api/tasks/{task_id}/submissions", {
-                        "answer": answer, "thinking": thinking, "llm_model_used": model_name,
+                        "answer": answer, "thinking": thinking, "llm_model_used": backend.display_name(),
                     })
                 except httpx.HTTPStatusError as e:
                     code = e.response.status_code
@@ -222,43 +383,175 @@ def run_mining(task_id: str, max_rounds: int):
                         import re
                         detail_msg = e.response.json().get("detail", "")
                         wait = int(m.group(1)) if (m := re.search(r"(\d+)s", detail_msg)) else 10
+                        record = build_error_record(task_id, answer, thinking,
+                            _usage_tokens(usage), _usage_cost_usd(usage),
+                            round_num, state.billing_mode, "rate limited", detail_msg)
+                        append_record(task_id, record)
                         rounds_data.append({"round": round_num, "score": None, "result": "rate limited", "earned": 0})
                         state.all_details.append({"score": None, "result": "rate limited", "earned": 0,
                                                   "error": detail_msg, "eval_details": None, "answer": answer, "thinking": thinking})
                         watcher.detail_count = len(state.all_details)
                         state.status = f"[dim yellow]► rate limited, waiting {wait}s...[/]"
-                        log.warning("Rate limited round %d: %s", round_num, detail_msg)
+                        log.warning(
+                            "Round %d end task=%s status=rate_limited finished_at=%s duration_s=%.2f wait_s=%d detail=%s",
+                            round_num,
+                            task_id,
+                            _now_iso(),
+                            time.monotonic() - round_started_mono,
+                            wait,
+                            detail_msg,
+                        )
                         time.sleep(wait)
                         continue
                     if code == 409:
                         consecutive_dups += 1
+                        record = build_error_record(task_id, answer, thinking,
+                            _usage_tokens(usage), _usage_cost_usd(usage),
+                            round_num, state.billing_mode, "duplicate", "duplicate answer")
+                        append_record(task_id, record)
                         rounds_data.append({"round": round_num, "score": None, "result": "duplicate", "earned": 0})
                         state.all_details.append({"score": None, "result": "duplicate", "earned": 0,
                                                   "error": "duplicate answer", "eval_details": None, "answer": answer, "thinking": thinking})
                         watcher.detail_count = len(state.all_details)
                         state.status = ""
-                        log.info("Duplicate answer round %d (%d consecutive)", round_num, consecutive_dups)
+                        log.info(
+                            "Round %d end task=%s status=duplicate finished_at=%s duration_s=%.2f consecutive_duplicates=%d",
+                            round_num,
+                            task_id,
+                            _now_iso(),
+                            time.monotonic() - round_started_mono,
+                            consecutive_dups,
+                        )
                         continue
+                    if code == 422:
+                        consecutive_errors += 1
+                        detail_msg = ""
+                        try:
+                            detail_msg = e.response.text[:500]
+                        except Exception:
+                            pass
+                        error_msg = f"422 validation error: {detail_msg}" if detail_msg else str(e)
+                        record = build_error_record(task_id, answer, thinking,
+                            _usage_tokens(usage), _usage_cost_usd(usage),
+                            round_num, state.billing_mode, "validation error", error_msg)
+                        append_record(task_id, record)
+                        rounds_data.append({"round": round_num, "score": None, "result": "validation error", "earned": 0})
+                        state.all_details.append({"score": None, "result": "validation error", "earned": 0,
+                                                  "error": error_msg, "eval_details": None, "answer": answer, "thinking": thinking})
+                        watcher.detail_count = len(state.all_details)
+                        state.status = ""
+                        log.warning(
+                            "Round %d end task=%s status=validation_error finished_at=%s duration_s=%.2f error=%s",
+                            round_num,
+                            task_id,
+                            _now_iso(),
+                            time.monotonic() - round_started_mono,
+                            error_msg,
+                        )
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                            console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                            break
+                        continue
+                    if code == 400:
+                        detail_msg = ""
+                        try:
+                            detail_msg = e.response.json().get("detail", "")
+                        except Exception:
+                            pass
+                        if "completed" in detail_msg or "closed" in detail_msg:
+                            console.print(f"  [yellow]Task is no longer open. Stopping.[/]")
+                            break
+                    if code == 404:
+                        console.print("  [yellow]Task not found. Stopping.[/]")
+                        break
+                    # Log response body for debugging
+                    consecutive_errors += 1
+                    resp_detail = ""
+                    try:
+                        resp_detail = e.response.text[:500]
+                    except Exception:
+                        pass
+                    error_msg = f"{e} — {resp_detail}" if resp_detail else str(e)
+                    record = build_error_record(task_id, answer, thinking,
+                        _usage_tokens(usage), _usage_cost_usd(usage),
+                        round_num, state.billing_mode, "error", error_msg)
+                    append_record(task_id, record)
                     rounds_data.append({"round": round_num, "score": None, "result": "error", "earned": 0})
                     state.all_details.append({"score": None, "result": "error", "earned": 0,
-                                              "error": str(e), "eval_details": None, "answer": answer, "thinking": thinking})
+                                              "error": error_msg, "eval_details": None, "answer": answer, "thinking": thinking})
                     watcher.detail_count = len(state.all_details)
                     state.status = ""
-                    log.error("Submit error round %d: %s", round_num, e, exc_info=True)
+                    log.error(
+                        "Round %d end task=%s status=submit_error finished_at=%s duration_s=%.2f error=%s body=%s",
+                        round_num,
+                        task_id,
+                        _now_iso(),
+                        time.monotonic() - round_started_mono,
+                        e,
+                        resp_detail,
+                    )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                        break
                     time.sleep(2)
                     continue
                 except Exception as e:
+                    consecutive_errors += 1
+                    record = build_error_record(task_id, answer, thinking,
+                        _usage_tokens(usage), _usage_cost_usd(usage),
+                        round_num, state.billing_mode, "crash", str(e))
+                    append_record(task_id, record)
                     rounds_data.append({"round": round_num, "score": None, "result": "crash", "earned": 0})
                     state.all_details.append({"score": None, "result": "crash", "earned": 0,
                                               "error": str(e), "eval_details": None, "answer": answer, "thinking": thinking})
                     watcher.detail_count = len(state.all_details)
                     state.status = ""
-                    log.error("Submit error round %d: %s", round_num, e, exc_info=True)
+                    log.error(
+                        "Round %d end task=%s status=submit_crash finished_at=%s duration_s=%.2f error=%s",
+                        round_num,
+                        task_id,
+                        _now_iso(),
+                        time.monotonic() - round_started_mono,
+                        e,
+                        exc_info=True,
+                    )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                        break
                     time.sleep(2)
                     continue
 
+                # --- Poll for async eval completion ---
+                if sub.get("eval_status") == "pending":
+                    state.status = f"[dim]► Round {round_num}  evaluating...[/]"
+                    poll_interval = 1
+                    max_wait = 120
+                    waited = 0
+                    while sub.get("eval_status") == "pending" and waited < max_wait:
+                        time.sleep(poll_interval)
+                        waited += poll_interval
+                        try:
+                            sub = api_get(f"/api/tasks/{task_id}/submissions/{sub['id']}")
+                        except Exception:
+                            pass  # network hiccup, keep polling
+
+                    if sub.get("eval_status") == "pending":
+                        # Timed out waiting for eval
+                        rounds_data.append({"round": round_num, "score": None, "result": "eval timeout", "earned": 0})
+                        state.all_details.append({"score": None, "result": "eval timeout", "earned": 0,
+                                                   "error": "eval timed out", "eval_details": None, "answer": answer, "thinking": thinking})
+                        watcher.detail_count = len(state.all_details)
+                        consecutive_errors += 1
+                        state.status = ""
+                        log.warning("Round %d eval timeout task=%s", round_num, task_id)
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                            console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                            break
+                        continue
+
                 # --- Process result ---
                 consecutive_dups = 0
+                consecutive_errors = 0
                 score = sub.get("score")
                 earned = sub.get("reward_earned", 0)
                 total_earned += earned
@@ -275,6 +568,12 @@ def run_mining(task_id: str, max_rounds: int):
                 else:
                     result_label = "no change"
 
+                record = build_local_record(sub, answer, thinking,
+                    _usage_tokens(usage), _usage_cost_usd(usage),
+                    round_num, state.billing_mode, result_label)
+                append_record(task_id, record)
+                my_past_subs.append(record)
+
                 rounds_data.append({"round": round_num, "score": score, "result": result_label, "earned": earned})
                 state.all_details.append({
                     "score": score, "result": result_label, "earned": earned,
@@ -282,7 +581,6 @@ def run_mining(task_id: str, max_rounds: int):
                     "answer": answer, "thinking": thinking,
                 })
                 watcher.detail_count = len(state.all_details)
-                state.status = ""
                 state.total_earned = total_earned
 
                 # --- Update state ---
@@ -298,25 +596,49 @@ def run_mining(task_id: str, max_rounds: int):
                     my_best_score = score
                     state.best_score = my_best_score
 
-                save_session(task_id, {
+                log.info(
+                    "Round %d end task=%s status=%s finished_at=%s duration_s=%.2f score=%s earned=%s improvement=%s completion=%s eval_error=%s",
+                    round_num,
+                    task_id,
+                    result_label,
+                    _now_iso(),
+                    time.monotonic() - round_started_mono,
+                    score,
+                    earned,
+                    is_improvement,
+                    is_completion,
+                    error,
+                )
+
+                save_session(session_key, {
                     "my_best_answer": my_best_answer,
                     "my_best_score": my_best_score,
                     "round_num": round_num,
                     "total_earned": total_earned,
-                    "model": model_name,
+                    "model": backend.display_name(),
                 })
 
+                # Refresh pool from server
+                try:
+                    task_check = api_get(f"/api/tasks/{task_id}", auth=False)
+                    state.pool = task_check.get("pool_balance", state.pool)
+                    task_status = task_check.get("status", "open")
+                except Exception:
+                    task_status = "open"
+
                 if is_completion:
-                    delete_session(task_id)
-                    state.status = "[bold green]✓ Task completed![/]"
+                    delete_session(session_key)
+                    state.status = f"[bold green]✓ Task completed! Earned {_fmt_usdc(total_earned)}[/]"
                     time.sleep(1)
                     break
 
-                # Check task still open
-                task_check = api_get(f"/api/tasks/{task_id}", auth=False)
-                if task_check.get("status") not in ("open",):
-                    console.print(f"  [yellow]Task {task_check.get('status')}[/]")
+                # Task closed by pool exhaustion or admin
+                if task_status != "open":
+                    delete_session(session_key)
+                    console.print("  [yellow]Task ended. Stopping.[/]")
                     break
+
+                state.status = ""
 
     except KeyboardInterrupt:
         console.print("\n  [yellow]Mining stopped. Session saved — run again to resume.[/]")
@@ -333,12 +655,17 @@ def run_mining(task_id: str, max_rounds: int):
     notable = [r for r in rounds_data if r["result"] != "no change"]
     if notable:
         print_mining_summary(notable, my_best_score, total_earned, round_num,
-                             total_tokens=total_tokens, total_cost=total_cost)
+                             total_tokens=total_tokens, total_cost=total_cost, billing_mode=state.billing_mode)
     else:
         best = f"{my_best_score:.6f}" if my_best_score is not None else "N/A"
-        cost_str = f"${total_cost:.4f}" if total_cost else "$0"
+        if state.billing_mode == "subscription":
+            token_str = "unknown" if total_tokens is None else f"{total_tokens:,}"
+            cost_str = "subscription"
+        else:
+            token_str = f"{(total_tokens or 0):,}"
+            cost_str = f"${total_cost:.4f}" if total_cost else "$0"
         console.print(f"\n  [bold gold1]ψ Mining Summary[/]")
         console.print(f"  Best:    {best}")
-        console.print(f"  Earned:  [green]{total_earned} $AXN[/]")
-        console.print(f"  Tokens:  {total_tokens:,}  Cost: [yellow]{cost_str}[/]")
+        console.print(f"  Earned:  [green]{_fmt_usdc(total_earned)}[/]")
+        console.print(f"  Tokens:  {token_str}  Cost: [yellow]{cost_str}[/]")
         console.print(f"  Rounds:  {round_num}\n")

@@ -1,5 +1,5 @@
 """Tests for LLM module — prompt building, response parsing."""
-from axon.llm import build_prompt, _parse_response
+from axon.llm import build_agent_prompt, build_prompt, _parse_response
 
 
 def test_build_prompt_first_attempt():
@@ -24,6 +24,17 @@ def test_build_prompt_code_task():
             "direction": "maximize", "completion_threshold": -380}
     prompt = build_prompt(task, None, None, None)
     assert "Do NOT hardcode" in prompt
+    assert "solution.py" in prompt
+    assert "RAW EXECUTABLE PYTHON CODE ONLY" in prompt
+
+
+def test_build_agent_prompt_code_task_matches_evaluator_contract():
+    task = {"title": "T", "description": "D", "eval_type": "code_output",
+            "direction": "maximize", "completion_threshold": -380}
+    prompt = build_agent_prompt(task, None, None, None)
+    assert "raw executable Python code only" in prompt
+    assert "solution.py" in prompt
+    assert "<answer></answer>" not in prompt
 
 
 def test_build_prompt_with_error_feedback():
@@ -59,6 +70,31 @@ def test_parse_response_strips_code_fences():
     thinking, answer = _parse_response("<answer>```python\nprint(1)\n```</answer>")
     assert "```" not in answer
     assert "print(1)" in answer
+
+
+def test_build_prompt_with_past_subs():
+    task = {"title": "T", "description": "D", "eval_type": "numeric",
+            "direction": "maximize", "completion_threshold": 100}
+    past_subs = [
+        {"score": 0.0, "eval_status": "completed", "eval_error": None},
+        {"score": None, "eval_status": "failed", "eval_error": "NameError: name 'x' is not defined"},
+        {"score": 50.1416, "eval_status": "completed", "eval_error": None},
+    ]
+    prompt = build_prompt(task, "my answer", 50.1416, 60.0, my_past_subs=past_subs)
+    assert "Past Submissions" in prompt
+    assert "DO NOT repeat" in prompt
+    assert "score=0.0000" in prompt
+    assert "score=error" in prompt
+    assert "NameError" in prompt
+    assert "score=50.1416" in prompt
+    assert "different approach" in prompt
+
+
+def test_build_prompt_with_past_subs_empty():
+    task = {"title": "T", "description": "D", "eval_type": "numeric",
+            "direction": "maximize", "completion_threshold": 100}
+    prompt = build_prompt(task, None, None, None, my_past_subs=[])
+    assert "Past Submissions" not in prompt
 
 
 def test_parse_response_multiline():

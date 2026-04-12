@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from axon.config import load_config, save_config, get_token, DEFAULT_CONFIG
+from axon.config import load_config, save_config, get_token, DEFAULT_CONFIG, resolve_cli_timeout
 
 
 def test_load_default_config(tmp_path):
@@ -49,3 +49,19 @@ def test_load_corrupt_config(tmp_path):
     with patch("axon.config.CONFIG_FILE", config_file):
         config = load_config()
         assert config == {**DEFAULT_CONFIG}
+
+
+def test_resolve_cli_timeout_positive():
+    assert resolve_cli_timeout({"cli_timeout": 900}) == 900
+
+
+def test_resolve_cli_timeout_disabled_by_zero():
+    assert resolve_cli_timeout({"cli_timeout": 0}) is None
+
+
+def test_resolve_cli_timeout_disabled_by_null():
+    assert resolve_cli_timeout({"cli_timeout": None}) is None
+
+
+def test_resolve_cli_timeout_invalid_uses_default():
+    assert resolve_cli_timeout({"cli_timeout": "bad"}) == 600

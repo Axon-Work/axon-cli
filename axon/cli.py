@@ -1,13 +1,16 @@
 """Axon CLI entry point."""
+import os
 import httpx
 import typer
 from axon.api import api_get, api_post, api_patch
-from axon.display import console
+from axon.display import console, print_banner, _fmt_usdc
 from axon.log import setup_logging
 
 setup_logging()
 
-app = typer.Typer(name="axon", help="Axon — Proof of Useful Work Mining CLI")
+app = typer.Typer(name="axon", help="Axon — USDC Bounty Mining CLI", add_completion=False)
+DEFAULT_MINE_ROUNDS = 5
+DEFAULT_MINE_TIMEOUT = 600
 
 
 def _api(fn, *args, **kwargs):
@@ -21,7 +24,12 @@ def _api(fn, *args, **kwargs):
         if e.response.status_code == 401:
             console.print("[red]Not authenticated. Run: axon onboard[/]")
         else:
-            console.print(f"[red]Error: {e.response.status_code}[/]")
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+            console.print(f"[red]Error {e.response.status_code}: {detail or e}[/]")
         raise typer.Exit(1)
 
 
@@ -33,13 +41,13 @@ def _is_first_run() -> bool:
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context):
     """Axon CLI. Run 'axon onboard' for first-time setup."""
+    print_banner()
     if ctx.invoked_subcommand is None:
         if _is_first_run():
-            console.print("[bold gold1]ψ Welcome to Axon![/]\n")
             console.print("First time? Run [bold green]axon onboard[/] to get started.\n")
             console.print("  [green]axon onboard[/]       Generate wallet + setup")
-            console.print("  [green]axon mine[/]          Start mining")
-            console.print("  [green]axon tui[/]           Interactive dashboard")
+            console.print("  [green]axon tasks[/]         List available tasks")
+            console.print("  [green]axon mine[/]          Start mining a task")
             console.print("  [green]axon --help[/]        All commands")
         else:
             from axon.wallet import get_address
@@ -47,11 +55,11 @@ def main(ctx: typer.Context):
             config = load_config()
             addr = get_address()
             model = config.get("default_model", "not set")
-            console.print(f"[bold gold1]ψ Axon[/]  wallet: [cyan]{addr[:6]}...{addr[-4:]}[/]  model: [cyan]{model}[/]\n")
-            console.print("  [green]axon mine[/]          Start mining")
-            console.print("  [green]axon tasks list[/]    Browse tasks")
-            console.print("  [green]axon balance[/]       Check $AXN balance")
-            console.print("  [green]axon tui[/]           Interactive dashboard")
+            console.print(f"  wallet: [cyan]{addr[:6]}...{addr[-4:]}[/]  model: [cyan]{model}[/]\n")
+            console.print("  [green]axon tasks[/]         List available tasks")
+            console.print("  [green]axon task <id>[/]     View task details")
+            console.print("  [green]axon mine[/]          Start mining a task")
+            console.print("  [green]axon balance[/]       Check USDC balance")
             console.print("  [green]axon wallet[/]        Show wallet address")
 
 
@@ -77,7 +85,7 @@ def onboard():
     from axon.config import save_config
     from axon.wallet import load_wallet, generate_wallet, save_wallet
 
-    console.print("\n[bold gold1]ψ Axon Onboard[/]\n")
+    console.print("\n[bold gold1]Onboard[/]\n")
 
     # Step 1: Wallet
     existing_wallet = load_wallet()
@@ -120,70 +128,97 @@ def onboard():
     except Exception:
         console.print("  [yellow]⚠ Could not authenticate (server may be offline)[/]")
 
-    # Step 4: LLM Provider (arrow-key select)
+    # Step 4: Mining backend
+    import shutil
     console.print()
-    provider_list = [
-        ("anthropic", "Anthropic (Claude)"),
-        ("openai",    "OpenAI (GPT / o-series)"),
-        ("deepseek",  "DeepSeek (Chat / Reasoner)"),
-        ("ollama",    "Ollama (local models)"),
+    backend_list = [
+        ("litellm",    "LiteLLM API (Anthropic/OpenAI/DeepSeek/Ollama)"),
+        ("claude-cli", "Claude Code CLI (agentic — tools, search, code exec)"),
+        ("codex-cli",  "OpenAI Codex CLI (agentic — code exec, search)"),
     ]
-    idx = _select("  Select LLM provider:\n", [label for _, label in provider_list])
+    backend_labels = []
+    for bid, label in backend_list:
+        avail = ""
+        if bid == "claude-cli" and not shutil.which("claude"):
+            avail = " [red](not installed)[/]"
+        elif bid == "codex-cli" and not shutil.which("codex"):
+            avail = " [red](not installed)[/]"
+        backend_labels.append(f"{label}{avail}")
+
+    idx = _select("  Select mining backend:\n", backend_labels)
     if idx is None:
         idx = 0
-    provider, provider_label = provider_list[idx]
-    console.print(f"  [green]✓ {provider_label}[/]\n")
+    chosen_backend = backend_list[idx][0]
+    save_config({"backend": chosen_backend})
+    console.print(f"  [green]✓ Backend: {chosen_backend}[/]")
+    _check_cli_available(chosen_backend, shutil)
 
-    # Step 5: API Key (visible) + fetch models
-    from axon.providers import fetch_models
-
-    if provider != "ollama":
-        import os
-        env_names = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}
-        env_key = env_names.get(provider, "")
-        existing_key = os.environ.get(env_key, "") if env_key else ""
-
-        if existing_key:
-            preview = f"{existing_key[:8]}...{existing_key[-4:]}"
-            console.print(f"  Found [cyan]{env_key}[/] in environment: [dim]{preview}[/]")
-            if typer.confirm("Use this key?", default=True):
-                api_key = existing_key
-            else:
-                api_key = typer.prompt(f"Enter {env_key}")
-        else:
-            api_key = typer.prompt(f"Enter {env_key or 'API key'}")
-
-        save_config({"api_keys": {provider: api_key}})
-        key_preview = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key
-        console.print(f"  [green]✓ Key saved[/] [dim]({key_preview})[/]\n")
-
-        console.print("  Fetching models from API...")
-        try:
-            models = fetch_models(provider, api_key)
-        except Exception:
-            models = []
-
-        _pick_model(models, provider, save_config)
+    # CLI backends skip API key / model selection
+    if chosen_backend in ("claude-cli", "codex-cli"):
+        console.print(f"\n  [dim]Using {chosen_backend} — API keys and model managed by the CLI tool.[/]")
     else:
-        api_base = typer.prompt("Ollama API base", default="http://localhost:11434")
-        save_config({"api_base": api_base})
+        # Step 5: LLM Provider (arrow-key select)
+        console.print()
+        provider_list = [
+            ("anthropic", "Anthropic (Claude)"),
+            ("openai",    "OpenAI (GPT / o-series)"),
+            ("deepseek",  "DeepSeek (Chat / Reasoner)"),
+            ("ollama",    "Ollama (local models)"),
+        ]
+        idx = _select("  Select LLM provider:\n", [label for _, label in provider_list])
+        if idx is None:
+            idx = 0
+        provider, provider_label = provider_list[idx]
+        console.print(f"  [green]✓ {provider_label}[/]\n")
 
-        console.print("  Fetching local models...")
-        try:
-            models = fetch_models("ollama", "", api_base)
-        except Exception:
-            models = []
+        # Step 6: API Key (visible) + fetch models
+        from axon.providers import fetch_models
 
-        _pick_model(models, "ollama", save_config)
+        if provider != "ollama":
+            import os
+            env_names = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}
+            env_key = env_names.get(provider, "")
+            existing_key = os.environ.get(env_key, "") if env_key else ""
 
-    # Done — launch TUI
+            if existing_key:
+                preview = f"{existing_key[:8]}...{existing_key[-4:]}"
+                console.print(f"  Found [cyan]{env_key}[/] in environment: [dim]{preview}[/]")
+                if typer.confirm("Use this key?", default=True):
+                    api_key = existing_key
+                else:
+                    api_key = typer.prompt(f"Enter {env_key}")
+            else:
+                api_key = typer.prompt(f"Enter {env_key or 'API key'}")
+
+            save_config({"api_keys": {provider: api_key}})
+            key_preview = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key
+            console.print(f"  [green]✓ Key saved[/] [dim]({key_preview})[/]\n")
+
+            console.print("  Fetching models from API...")
+            try:
+                models = fetch_models(provider, api_key)
+            except Exception:
+                models = []
+
+            _pick_model(models, provider, save_config)
+        else:
+            api_base = typer.prompt("Ollama API base", default="http://localhost:11434")
+            save_config({"api_base": api_base})
+
+            console.print("  Fetching local models...")
+            try:
+                models = fetch_models("ollama", "", api_base)
+            except Exception:
+                models = []
+
+            _pick_model(models, "ollama", save_config)
+
+    # Done
     from axon.wallet import get_address
     console.print(f"\n[bold gold1]ψ Setup complete![/]")
     console.print(f"  Wallet: [cyan]{get_address()}[/]\n")
-
-    console.print("  Launching TUI...\n")
-    from axon.tui.app import run_tui
-    run_tui()
+    console.print("  Run [green]axon tasks[/] to see available tasks.")
+    console.print("  Run [green]axon mine[/] to start mining.\n")
 
 
 def _pick_model(models: list[dict], provider: str, save_config):
@@ -235,23 +270,57 @@ def model(name: str = ""):
     current = config.get("default_model", "not set")
 
     if name:
-        # Direct set: axon model anthropic/claude-sonnet-4-20250514
         save_config({"default_model": name})
         console.print(f"  [green]✓ Model: {name}[/]")
         return
 
     console.print(f"\n  Current model: [bold cyan]{current}[/]\n")
 
-    # Detect provider from current model
-    provider = current.split("/")[0] if "/" in current else ""
+    # Step 1: Pick provider
+    providers = [
+        ("anthropic", "Anthropic (Claude)"),
+        ("openai",    "OpenAI (GPT / o-series)"),
+        ("deepseek",  "DeepSeek (Chat / Reasoner)"),
+        ("ollama",    "Ollama (local models)"),
+        ("manual",    "Enter model name manually"),
+    ]
+    current_provider = current.split("/")[0] if "/" in current else ""
+    cursor = next((i for i, (pid, _) in enumerate(providers) if pid == current_provider), 0)
+    idx = _select("  Select provider:\n", [label for _, label in providers], cursor_index=cursor)
+    if idx is None:
+        return
+    provider, _ = providers[idx]
+
+    if provider == "manual":
+        name = typer.prompt("Model name (e.g. anthropic/claude-sonnet-4-20250514)")
+        save_config({"default_model": name})
+        console.print(f"  [green]✓ Model: {name}[/]")
+        return
+
+    # Step 2: Check API key
     keys = config.get("api_keys", {})
     api_key = keys.get(provider, "")
     api_base = config.get("api_base", "")
 
-    models = []
-    if api_key or provider == "ollama":
-        console.print("  Fetching models...")
+    if provider != "ollama" and not api_key:
+        import os
+        env_names = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}
+        env_var = env_names.get(provider, "")
+        env_key = os.environ.get(env_var, "")
+        if env_key:
+            api_key = env_key
+            console.print(f"  Using [cyan]{env_var}[/] from environment")
+        else:
+            api_key = typer.prompt(f"Enter {env_var or 'API key'}")
+            save_config({"api_keys": {provider: api_key}})
+            console.print(f"  [green]✓ Key saved[/]")
+
+    # Step 3: Fetch and pick model
+    console.print("  Fetching models...")
+    try:
         models = fetch_models(provider, api_key, api_base)
+    except Exception:
+        models = []
 
     if models:
         menu_items = [m["label"] for m in models[:20]] + ["Enter model name manually"]
@@ -260,152 +329,243 @@ def model(name: str = ""):
             return
         if idx == len(menu_items) - 1:
             name = typer.prompt("Model name")
-            save_config({"default_model": f"{provider}/{name}" if provider else name})
+            save_config({"default_model": f"{provider}/{name}"})
             console.print(f"  [green]✓ Model: {provider}/{name}[/]")
         else:
             save_config({"default_model": models[idx]["value"]})
             console.print(f"  [green]✓ Model: {models[idx]['value']}[/]")
     else:
-        name = typer.prompt("Enter model name (e.g. anthropic/claude-sonnet-4-20250514)")
-        save_config({"default_model": name})
-        console.print(f"  [green]✓ Model: {name}[/]")
+        console.print("  [yellow]Could not fetch models[/]")
+        name = typer.prompt("Model name")
+        save_config({"default_model": f"{provider}/{name}"})
+        console.print(f"  [green]✓ Model: {provider}/{name}[/]")
 
 
-# --- TUI ---
-
-@app.command()
-def tui():
-    """Launch interactive TUI dashboard."""
-    from axon.tui.app import run_tui
-    run_tui()
-
+# --- Backend ---
 
 @app.command()
-def dev():
-    """Launch TUI with CSS hot-reload (dev mode)."""
-    import os
-    os.environ["TEXTUAL"] = "devtools"
-    from axon.tui.app import run_tui
-    run_tui()
+def backend(name: str = typer.Argument("", help="Backend name: auto, litellm, claude-cli, codex-cli")):
+    """Show or switch mining backend (auto, litellm, claude-cli, codex-cli)."""
+    import shutil
+    from axon.backends import auto_detect_backend
+    from axon.config import load_config, save_config
+
+    config = load_config()
+    current = config.get("backend", "auto")
+
+    backends = [
+        ("auto",       "Auto (claude-cli > codex-cli > litellm)"),
+        ("claude-cli", "Claude Code CLI (agentic — tools, search, code exec)"),
+        ("codex-cli",  "OpenAI Codex CLI (agentic — code exec, search)"),
+        ("litellm",    "LiteLLM (API: Anthropic/OpenAI/DeepSeek/Ollama)"),
+    ]
+
+    if name:
+        valid = [b[0] for b in backends]
+        if name not in valid:
+            console.print(f"[red]Unknown backend '{name}'. Choose from: {', '.join(valid)}[/]")
+            raise typer.Exit(1)
+        if name != "auto":
+            _check_cli_available(name, shutil)
+        save_config({"backend": name})
+        resolved = auto_detect_backend() if name == "auto" else name
+        console.print(f"  [green]✓ Backend: {name}[/]" + (f" [dim](→ {resolved})[/]" if name == "auto" else ""))
+        return
+
+    resolved = auto_detect_backend() if current == "auto" else current
+    console.print(f"\n  Current backend: [bold cyan]{current}[/]" + (f" [dim](→ {resolved})[/]" if current == "auto" else "") + "\n")
+
+    # Mark availability
+    labels = []
+    for bid, label in backends:
+        avail = ""
+        if bid == "claude-cli" and not shutil.which("claude"):
+            avail = " [red](not installed)[/]"
+        elif bid == "codex-cli" and not shutil.which("codex"):
+            avail = " [red](not installed)[/]"
+        labels.append(f"{label}{avail}")
+
+    cursor = next((i for i, (bid, _) in enumerate(backends) if bid == current), 0)
+    idx = _select("  Select mining backend:\n", labels, cursor_index=cursor)
+    if idx is None:
+        return
+
+    chosen = backends[idx][0]
+    if chosen != "auto":
+        _check_cli_available(chosen, shutil)
+    save_config({"backend": chosen})
+    resolved = auto_detect_backend() if chosen == "auto" else chosen
+    console.print(f"  [green]✓ Backend: {chosen}[/]" + (f" [dim](→ {resolved})[/]" if chosen == "auto" else ""))
 
 
-# --- Mine ---
+def _check_cli_available(backend_name: str, shutil):
+    """Warn if CLI tool is not installed."""
+    if backend_name == "claude-cli" and not shutil.which("claude"):
+        console.print("  [yellow]⚠ 'claude' CLI not found in PATH. Install: npm install -g @anthropic-ai/claude-code[/]")
+    elif backend_name == "codex-cli" and not shutil.which("codex"):
+        console.print("  [yellow]⚠ 'codex' CLI not found in PATH. Install: npm install -g @openai/codex[/]")
+
+
+# --- Tasks ---
 
 @app.command()
-def mine(task_id: str = "", max_rounds: int = 0, auto: bool = False):
-    """Start mining. Shows task list to pick from."""
+def tasks(status_filter: str = "open"):
+    """List available tasks."""
+    from axon.display import print_task_list
+    data = _api(api_get, f"/api/tasks?status_filter={status_filter}", auth=False)
+    print_task_list(data)
+
+
+@app.command()
+def task(task_id: str):
+    """View details of a specific task by ID (or row number from 'axon tasks')."""
+    from axon.display import print_task_detail
+
+    # Allow row number shorthand: "axon task 3" → pick 3rd open task
+    if task_id.isdigit():
+        idx = int(task_id)
+        task_list = _api(api_get, "/api/tasks?status_filter=open", auth=False)
+        if not task_list:
+            console.print("[yellow]No open tasks.[/]")
+            raise typer.Exit(1)
+        if idx < 1 or idx > len(task_list):
+            console.print(f"[red]Row #{idx} out of range (1-{len(task_list)})[/]")
+            raise typer.Exit(1)
+        data = task_list[idx - 1]
+    else:
+        data = _api(api_get, f"/api/tasks/{task_id}", auth=False)
+
+    print_task_detail(data)
+
+
+# --- Mine (task selection) ---
+
+@app.command()
+def mine(
+    max_rounds: int = typer.Option(
+        DEFAULT_MINE_ROUNDS,
+        "--max-rounds",
+        min=0,
+        help="Maximum mining rounds for this run. Use 0 for no round limit.",
+    ),
+    timeout: int = typer.Option(
+        DEFAULT_MINE_TIMEOUT,
+        "--timeout",
+        min=1,
+        help="Hard timeout in seconds for each CLI backend call during this run.",
+    ),
+    yolo: bool = typer.Option(
+        False,
+        "--yolo",
+        "-yolo",
+        help="Disable hard timeout and round limit for this run. Stop with Ctrl+C.",
+    ),
+):
+    """Start mining a task. Select from available tasks."""
     from axon.mining import run_mining
 
-    tasks = _api(api_get, "/api/tasks?task_status=open", auth=False)
-    tasks.sort(key=lambda t: t.get("pool_balance", 0), reverse=True)
+    if yolo and max_rounds != DEFAULT_MINE_ROUNDS:
+        console.print("[red]Cannot combine --yolo with --max-rounds.[/]")
+        raise typer.Exit(1)
+    if yolo and timeout != DEFAULT_MINE_TIMEOUT:
+        console.print("[red]Cannot combine --yolo with --timeout.[/]")
+        raise typer.Exit(1)
 
-    if not tasks:
-        console.print("[red]No open tasks available.[/]")
+    # Get open tasks
+    task_list = _api(api_get, "/api/tasks?status_filter=open", auth=False)
+    if not task_list:
+        console.print("[yellow]No open tasks available.[/]")
         raise typer.Exit()
 
-    if not task_id:
-        if auto:
-            task_id = tasks[0]["id"]
-        else:
-            menu_items = []
-            for t in tasks[:20]:
-                best = f"{t['best_score']:.2f}" if t.get("best_score") is not None else "  -"
-                menu_items.append(f"{t['title'][:40]:<40}  {t['pool_balance']:>6} $AXN  best: {best}")
+    if len(task_list) == 1:
+        task = task_list[0]
+        console.print(f"  Mining: [bold]{task['title']}[/]  Pool: [green]{_fmt_usdc(task.get('pool_balance', 0))}[/]\n")
+    else:
+        # Task selection menu
+        options = []
+        for t in task_list:
+            pool = _fmt_usdc(t.get("pool_balance", 0))
+            options.append(f"{t['title']}  ({pool})")
+        idx = _select("  Select task to mine:\n", options)
+        if idx is None:
+            return
+        task = task_list[idx]
 
-            console.print("\n  [bold gold1]ψ Open Tasks[/] (sorted by pool)\n")
-            idx = _select("  Select task to mine:\n", menu_items)
-            if idx is None:
-                raise typer.Exit()
-            task_id = tasks[idx]["id"]
-
-    # --- Start mining loop ---
-    run_mining(task_id, max_rounds)
+    effective_max_rounds = 0 if yolo else max_rounds
+    effective_timeout = None if yolo else timeout
+    os.system("clear")
+    print_banner()
+    run_mining(task, effective_max_rounds, cli_timeout_override=effective_timeout)
 
 
 # --- Balance ---
 
 @app.command()
 def balance():
-    """Show $AXN balance."""
+    """Show USDC balance + on-chain assets (Base)."""
     me = _api(api_get, "/api/auth/me")
-    console.print(f"  Wallet: [cyan]{me['address'][:6]}...{me['address'][-4:]}[/]")
-    console.print(f"  Balance: [bold green]{me['balance']:,} $AXN[/]")
+    addr = me["address"]
+    console.print(f"\n  Wallet:  [cyan]{addr}[/]")
+    console.print(f"  USDC:    [bold green]{_fmt_usdc(me['balance'])}[/]  (platform)")
+
+    # On-chain balances (Base mainnet)
+    console.print(f"\n  [bold]Base Chain[/]")
+    try:
+        on_chain = _fetch_base_balances(addr)
+        console.print(f"  ETH:     [bold]{on_chain['eth']:.6f}[/]")
+        console.print(f"  USDC:    [bold]{on_chain['usdc']:.2f}[/]")
+        console.print(f"  USDT:    [bold]{on_chain['usdt']:.2f}[/]")
+    except Exception:
+        console.print(f"  [dim](could not fetch on-chain balances)[/]")
+    console.print()
 
 
-# --- Tasks ---
+def _fetch_base_balances(address: str) -> dict:
+    """Fetch ETH, USDC, USDT balances on Base mainnet via public RPC."""
+    import httpx
 
-tasks_app = typer.Typer(help="Task management")
-app.add_typer(tasks_app, name="tasks")
+    rpcs = [
+        "https://base.llamarpc.com",
+        "https://base-mainnet.public.blastapi.io",
+        "https://mainnet.base.org",
+    ]
+    usdc_contract = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    usdt_contract = "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"
 
+    padded_addr = "0" * 24 + address[2:].lower()
+    calldata = "0x70a08231" + padded_addr
 
-@tasks_app.command("list")
-def tasks_list(status: str = "open"):
-    """List tasks as a Rich Table."""
-    from axon.display import print_tasks
-    data = _api(api_get, f"/api/tasks?task_status={status}", auth=False)
-    if not data:
-        console.print("[dim]No tasks found.[/]")
-        return
-    print_tasks(data, title=f"{status.capitalize()} Tasks")
+    def rpc_call(method, params):
+        for rpc in rpcs:
+            try:
+                resp = httpx.post(rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                                  timeout=10, transport=httpx.HTTPTransport(proxy=None))
+                result = resp.json().get("result")
+                if result:
+                    return result
+            except Exception:
+                continue
+        return "0x0"
 
+    eth_raw = rpc_call("eth_getBalance", [address, "latest"])
+    usdc_raw = rpc_call("eth_call", [{"to": usdc_contract, "data": calldata}, "latest"])
+    usdt_raw = rpc_call("eth_call", [{"to": usdt_contract, "data": calldata}, "latest"])
 
-@tasks_app.command("view")
-def tasks_view(task_id: str):
-    """View task details."""
-    from axon.display import print_task_detail
-    t = _api(api_get, f"/api/tasks/{task_id}", auth=False)
-    print_task_detail(t)
-
-
-@tasks_app.command("create")
-def tasks_create():
-    """Interactively create a new task."""
-    console.print("\n[bold gold1]ψ Create Task[/]\n")
-
-    title = typer.prompt("Title")
-    description = typer.prompt("Description")
-
-    eval_types = ["exact_match", "numeric", "contains", "regex", "code_output", "llm_judge"]
-    console.print("\n  Eval types: " + ", ".join(eval_types))
-    eval_type = typer.prompt("Eval type", default="exact_match")
-    if eval_type not in eval_types:
-        console.print(f"[red]Invalid eval type: {eval_type}[/]")
-        raise typer.Exit(1)
-
-    direction = typer.prompt("Direction (maximize/minimize)", default="maximize")
-    threshold = typer.prompt("Completion threshold", default="1.0", type=float)
-    task_burn = typer.prompt("Task burn ($AXN to stake)", type=int)
-
-    eval_config: dict = {}
-    if eval_type == "exact_match":
-        expected = typer.prompt("Expected answer")
-        eval_config["expected"] = expected
-    elif eval_type == "regex":
-        pattern = typer.prompt("Regex pattern")
-        eval_config["pattern"] = pattern
-    elif eval_type == "contains":
-        substring = typer.prompt("Required substring")
-        eval_config["substring"] = substring
-
-    result = _api(api_post, "/api/tasks", {
-        "title": title,
-        "description": description,
-        "eval_type": eval_type,
-        "eval_config": eval_config,
-        "direction": direction,
-        "completion_threshold": threshold,
-        "task_burn": task_burn,
-    })
-    console.print(f"\n  [green]✓ Task created: {result['id']}[/]")
-    console.print(f"  Pool: [green]{result['pool_balance']} $AXN[/]")
+    return {
+        "eth": int(eth_raw, 16) / 1e18,
+        "usdc": int(usdc_raw, 16) / 1e6,
+        "usdt": int(usdt_raw, 16) / 1e6,
+    }
 
 
-@tasks_app.command("close")
-def tasks_close(task_id: str):
-    """Close a task (refunds remaining pool)."""
-    result = _api(api_patch, f"/api/tasks/{task_id}")
-    console.print(f"  [green]✓ Task closed: {result['id']}[/]")
-    console.print(f"  Refunded: [green]{result.get('pool_balance', 0)} $AXN[/]")
+# --- Network ---
+
+@app.command()
+def network():
+    """Show global network overview — active miners, pools, per-task competition."""
+    from axon.display import print_network
+    data = _api(api_get, "/api/network", auth=False)
+    print_network(data)
 
 
 # --- Stats ---
@@ -418,8 +578,18 @@ def stats():
     me = _api(api_get, "/api/auth/me")
     txns = _api(api_get, "/api/transactions?limit=1000")
 
-    earned = sum(t["amount"] for t in txns if t.get("amount", 0) > 0)
-    burned = abs(sum(t["amount"] for t in txns if t.get("amount", 0) < 0))
-    improvements = sum(1 for t in txns if t.get("type") == "mining_reward")
+    breakdown = {
+        "pool_reward": 0,
+        "completion_reward": 0,
+    }
+    for t in txns:
+        typ = t.get("type", "")
+        amt = t.get("amount", 0)
+        if typ in breakdown:
+            breakdown[typ] += amt
+        elif amt > 0:
+            breakdown.setdefault("other_in", 0)
+            breakdown["other_in"] = breakdown.get("other_in", 0) + amt
 
-    print_stats(me, earned, burned, improvements)
+    improvements = sum(1 for t in txns if t.get("type") == "pool_reward")
+    print_stats(me, breakdown, improvements)

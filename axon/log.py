@@ -1,9 +1,10 @@
 """Centralized logging — all errors auto-saved to ~/.axon/logs/."""
 import logging
 import sys
-from pathlib import Path
 
-LOG_DIR = Path.home() / ".axon" / "logs"
+from axon.config import AXON_HOME
+
+LOG_DIR = AXON_HOME / "logs"
 LOG_FILE = LOG_DIR / "axon.log"
 
 

@@ -1,7 +1,6 @@
 """Tests for CLI commands — smoke tests and basic functionality."""
 from unittest.mock import patch
 
-import pytest
 from typer.testing import CliRunner
 
 from axon.cli import app
@@ -16,7 +15,8 @@ def test_root_first_run():
     with patch("axon.cli._is_first_run", return_value=True):
         result = runner.invoke(app)
     assert result.exit_code == 0
-    assert "Welcome to Axon" in result.output
+    assert "A X O N" in result.output
+    assert "axon tui" not in result.output
 
 
 def test_root_existing_wallet():
@@ -30,6 +30,7 @@ def test_root_existing_wallet():
     assert result.exit_code == 0
     assert "0xAbCd" in result.output
     assert "claude-sonnet" in result.output
+    assert "axon tui" not in result.output
 
 
 # ---------- axon --help ----------
@@ -38,6 +39,7 @@ def test_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "Axon" in result.output
+    assert "tui" not in result.output
 
 
 # ---------- axon wallet ----------
@@ -58,30 +60,14 @@ def test_wallet_with_wallet():
     assert result.exit_code == 0
     assert "0x1234abcd" in result.output
 
-
-# ---------- axon tui ----------
-
-def test_tui_launches():
-    """tui command calls run_tui."""
-    import axon.tui.app  # ensure module is loaded before patching
-    with patch.object(axon.tui.app, "run_tui") as mock_run:
-        result = runner.invoke(app, ["tui"])
-    mock_run.assert_called_once()
-    assert result.exit_code == 0
-
-
-# ---------- axon dev ----------
-
-def test_dev_sets_textual_env():
-    """dev command sets TEXTUAL env var and calls run_tui."""
-    import axon.tui.app
-    with patch.object(axon.tui.app, "run_tui") as mock_run:
-        result = runner.invoke(app, ["dev"])
-    mock_run.assert_called_once()
-    assert result.exit_code == 0
-
-
 # ---------- axon balance ----------
+
+def test_tui_command_removed():
+    """tui command is no longer available."""
+    result = runner.invoke(app, ["tui"])
+    assert result.exit_code != 0
+    assert "No such command" in result.output
+
 
 def test_balance():
     """balance command shows wallet + balance."""
@@ -89,7 +75,7 @@ def test_balance():
     with patch("axon.cli.api_get", return_value=fake_me):
         result = runner.invoke(app, ["balance"])
     assert result.exit_code == 0
-    assert "1,500" in result.output
+    assert "$15.00" in result.output
     assert "0xAbCd" in result.output
 
 
@@ -102,31 +88,139 @@ def test_mine_no_tasks():
     assert "No open tasks" in result.output
 
 
-def test_mine_auto():
-    """--auto flag picks highest pool task and starts mining."""
-    fake_tasks = [
-        {"id": "aaaa-bbbb", "title": "Best task", "pool_balance": 500, "best_score": None,
-         "eval_type": "exact_match", "direction": "maximize", "completion_threshold": 1.0,
-         "description": "test", "eval_config": {}, "status": "open"},
-        {"id": "cccc-dddd", "title": "Other task", "pool_balance": 100, "best_score": None},
-    ]
-    fake_task = fake_tasks[0]
-    fake_best = {"score": None, "submission_id": None}
-
-    def mock_api_get(path, auth=True):
-        if "task_status" in path:
-            return fake_tasks
-        if "best" in path:
-            return fake_best
-        return fake_task
+def test_mine_single_task():
+    """mine starts immediately when there is a single open task."""
+    fake_task = {
+        "id": "aaaa-bbbb",
+        "title": "Best task",
+        "pool_balance": 500,
+        "best_score": None,
+        "eval_type": "exact_match",
+        "direction": "maximize",
+        "completion_threshold": 1.0,
+        "description": "test",
+        "eval_config": {},
+        "status": "open",
+    }
 
     with (
-        patch("axon.cli.api_get", side_effect=mock_api_get),
-        patch("axon.mining.api_get", side_effect=mock_api_get),
-        patch("axon.mining.call_llm", side_effect=KeyboardInterrupt),
+        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.mining.run_mining") as mock_run_mining,
+        patch("os.system", return_value=0),
     ):
-        result = runner.invoke(app, ["mine", "--auto"])
-    assert "Mining stopped" in result.output or "Mining Summary" in result.output or result.exit_code == 0
+        result = runner.invoke(app, ["mine"])
+    assert result.exit_code == 0
+    mock_run_mining.assert_called_once_with(fake_task, 5, cli_timeout_override=600)
+
+
+def test_mine_yolo_single_task():
+    """mine --yolo disables hard timeout and round limit for this run."""
+    fake_task = {
+        "id": "aaaa-bbbb",
+        "title": "Best task",
+        "pool_balance": 500,
+        "best_score": None,
+        "eval_type": "exact_match",
+        "direction": "maximize",
+        "completion_threshold": 1.0,
+        "description": "test",
+        "eval_config": {},
+        "status": "open",
+    }
+
+    with (
+        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.mining.run_mining") as mock_run_mining,
+    ):
+        result = runner.invoke(app, ["mine", "--yolo"])
+    assert result.exit_code == 0
+    mock_run_mining.assert_called_once_with(fake_task, 0, cli_timeout_override=None)
+
+
+def test_mine_yolo_single_dash_alias():
+    """mine -yolo is accepted as an alias for --yolo."""
+    fake_task = {
+        "id": "aaaa-bbbb",
+        "title": "Best task",
+        "pool_balance": 500,
+        "best_score": None,
+        "eval_type": "exact_match",
+        "direction": "maximize",
+        "completion_threshold": 1.0,
+        "description": "test",
+        "eval_config": {},
+        "status": "open",
+    }
+
+    with (
+        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.mining.run_mining") as mock_run_mining,
+    ):
+        result = runner.invoke(app, ["mine", "-yolo"])
+    assert result.exit_code == 0
+    mock_run_mining.assert_called_once_with(fake_task, 0, cli_timeout_override=None)
+
+
+def test_mine_yolo_conflicts_with_max_rounds():
+    with patch("axon.cli.api_get", return_value=[]):
+        result = runner.invoke(app, ["mine", "--yolo", "--max-rounds", "10"])
+    assert result.exit_code == 1
+    assert "Cannot combine --yolo with --max-rounds" in result.output
+
+
+def test_mine_yolo_conflicts_with_timeout():
+    with patch("axon.cli.api_get", return_value=[]):
+        result = runner.invoke(app, ["mine", "--yolo", "--timeout", "180"])
+    assert result.exit_code == 1
+    assert "Cannot combine --yolo with --timeout" in result.output
+
+
+def test_mine_custom_max_rounds():
+    """mine --max-rounds overrides the default round cap but keeps the default timeout."""
+    fake_task = {
+        "id": "aaaa-bbbb",
+        "title": "Best task",
+        "pool_balance": 500,
+        "best_score": None,
+        "eval_type": "exact_match",
+        "direction": "maximize",
+        "completion_threshold": 1.0,
+        "description": "test",
+        "eval_config": {},
+        "status": "open",
+    }
+
+    with (
+        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.mining.run_mining") as mock_run_mining,
+    ):
+        result = runner.invoke(app, ["mine", "--max-rounds", "10"])
+    assert result.exit_code == 0
+    mock_run_mining.assert_called_once_with(fake_task, 10, cli_timeout_override=600)
+
+
+def test_mine_custom_timeout():
+    """mine --timeout overrides the default hard timeout but keeps the default round cap."""
+    fake_task = {
+        "id": "aaaa-bbbb",
+        "title": "Best task",
+        "pool_balance": 500,
+        "best_score": None,
+        "eval_type": "exact_match",
+        "direction": "maximize",
+        "completion_threshold": 1.0,
+        "description": "test",
+        "eval_config": {},
+        "status": "open",
+    }
+
+    with (
+        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.mining.run_mining") as mock_run_mining,
+    ):
+        result = runner.invoke(app, ["mine", "--timeout", "180"])
+    assert result.exit_code == 0
+    mock_run_mining.assert_called_once_with(fake_task, 5, cli_timeout_override=180)
 
 
 # ---------- axon tasks list ----------
@@ -138,16 +232,16 @@ def test_tasks_list():
          "eval_type": "exact_match", "best_score": 0.95, "pool_balance": 200},
     ]
     with patch("axon.cli.api_get", return_value=fake_tasks):
-        result = runner.invoke(app, ["tasks", "list"])
+        result = runner.invoke(app, ["tasks"])
     assert result.exit_code == 0
     assert "Test task" in result.output
-    assert "200" in result.output
+    assert "$2.00" in result.output
 
 
 def test_tasks_list_empty():
     """tasks list with no tasks → empty output."""
     with patch("axon.cli.api_get", return_value=[]):
-        result = runner.invoke(app, ["tasks", "list"])
+        result = runner.invoke(app, ["tasks"])
     assert result.exit_code == 0
 
 
@@ -163,7 +257,7 @@ def test_tasks_view():
         "best_score": 0.5, "pool_balance": 300,
     }
     with patch("axon.cli.api_get", return_value=fake_task):
-        result = runner.invoke(app, ["tasks", "view", "11112222"])
+        result = runner.invoke(app, ["task", "11112222-3333-4444-5555-666677778888"])
     assert result.exit_code == 0
     assert "My task" in result.output
-    assert "300" in result.output
+    assert "$3.00" in result.output
