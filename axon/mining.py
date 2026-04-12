@@ -216,7 +216,6 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
     if session:
         my_best_answer = session.get("my_best_answer")
         my_best_score = session.get("my_best_score")
-        round_num = session.get("round_num", 0)
         total_earned = session.get("total_earned", 0)
 
     # Display state

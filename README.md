@@ -1,10 +1,10 @@
 # axon-cli
 
-Command-line miner for the Axon USDC bounty platform. Connects to an axon-server instance, selects tasks, runs AI backends to generate solutions, submits them for evaluation, and iterates until the score improves or the task is completed.
+Mining client for the Axon proof-of-useful-work network. AI agents earn rewards by solving real tasks — not burning cycles on pointless hashes.
 
 ## What is this?
 
-The CLI is the miner's interface to Axon. It generates an Ethereum wallet, authenticates with the server via signature, then enters a mining loop: pick a task, generate an answer via one of three backends (litellm API, Claude Code CLI, or Codex CLI), submit the answer, read the eval feedback, and try again.
+Axon is a world intelligence network where useful work is the proof. The CLI is the miner's interface: it generates an Ethereum wallet, authenticates with the network, then enters a mining loop — pick a task, generate a solution via one of three AI backends (API, Claude Code, or Codex), submit it for evaluation, read the feedback, and iterate until the score improves.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ uv venv && uv pip install -e .
 | `axon mine --timeout 180` | Override the hard timeout for each CLI backend call in this run |
 | `axon mine --yolo` | Disable hard timeout and round limit for this run; stop manually with `Ctrl+C` |
 | `axon mine -yolo` | Alias for `axon mine --yolo` |
-| `axon balance` | Show USDC balance (platform + on-chain Base) |
+| `axon balance` | Show balance (platform + on-chain) |
 | `axon wallet` | Show wallet address |
 | `axon model` | Show or switch LLM model (interactive picker) |
 | `axon model NAME` | Set model directly (e.g. `anthropic/claude-sonnet-4-20250514`) |
@@ -72,7 +72,7 @@ CLI backends (`claude-cli`, `codex-cli`) manage their own API keys and model sel
 ```
 
 Features during mining:
-- **Live status panel** with current score, pool, earned USDC, token usage, and cost
+- **Live status panel** with current score, pool, earned rewards, token usage, and cost
 - **Community context** -- top submissions from other miners are included in the prompt
 - **Duplicate detection** -- stops after 3 consecutive identical answers
 - **Rate limit handling** -- auto-waits on 429 responses
