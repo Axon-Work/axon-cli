@@ -11,7 +11,7 @@ from rich.live import Live
 from axon.api import api_get, api_post
 from axon.backends import create_backend
 from axon.config import AXON_HOME, load_config
-from axon.display import console, build_mining_panel, fmt_round, print_mining_summary, _fmt_usdc
+from axon.display import console, build_mining_panel, fmt_round, print_mining_summary, _fmt_usdc, BRAILLE_FRAMES
 from axon.history import merge_server_history, build_local_record, build_error_record, append_record
 from axon.llm import build_prompt, build_agent_prompt
 from axon.session import load_session, save_session, delete_session
@@ -146,7 +146,8 @@ class MiningDisplay:
         status = self.status
         if self.call_started_at is not None:
             elapsed = int(time.monotonic() - self.call_started_at)
-            status = f"{status} ({elapsed}s)"
+            frame = BRAILLE_FRAMES[int(time.monotonic() * 8) % len(BRAILLE_FRAMES)]
+            status = f"{status} {frame} ({elapsed}s)"
 
         # Pick detail by watcher index, clamping to valid range
         idx = self._watcher.detail_idx
@@ -370,6 +371,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                     continue
 
                 state.status = f"[dim]► Round {round_num}  submitting...[/]"
+                state.call_started_at = time.monotonic()
 
                 # --- Submit to task ---
                 thinking = thinking or "(no reasoning provided)"
@@ -378,6 +380,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         "answer": answer, "thinking": thinking, "llm_model_used": backend.display_name(),
                     })
                 except httpx.HTTPStatusError as e:
+                    state.call_started_at = None
                     code = e.response.status_code
                     if code == 429:
                         import re
@@ -496,6 +499,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                     time.sleep(2)
                     continue
                 except Exception as e:
+                    state.call_started_at = None
                     consecutive_errors += 1
                     record = build_error_record(task_id, answer, thinking,
                         _usage_tokens(usage), _usage_cost_usd(usage),
@@ -522,7 +526,10 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                     continue
 
                 # --- Poll for async eval completion ---
+                state.call_started_at = None  # clear submit timer
+
                 if sub.get("eval_status") == "pending":
+                    state.call_started_at = time.monotonic()
                     state.status = f"[dim]► Round {round_num}  evaluating...[/]"
                     poll_interval = 1
                     max_wait = 120
@@ -534,6 +541,8 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                             sub = api_get(f"/api/tasks/{task_id}/submissions/{sub['id']}")
                         except Exception:
                             pass  # network hiccup, keep polling
+
+                    state.call_started_at = None  # clear eval timer
 
                     if sub.get("eval_status") == "pending":
                         # Timed out waiting for eval

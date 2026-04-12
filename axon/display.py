@@ -7,6 +7,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
+BRAILLE_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def print_banner():

@@ -103,28 +103,24 @@ def onboard():
         console.print(f"  [green]✓ Wallet generated: {wallet['address']}[/]")
         console.print(f"  [dim]Private key saved to ~/.axon/wallet.json[/]")
 
-    # Step 2: Server
+    # Step 2: Connect & authenticate with server
     console.print()
-    from axon.config import load_config
-    existing = load_config()
-    default_server = existing.get("server_url", "http://localhost:8000")
-    server = typer.prompt("Server URL", default=default_server)
+    from axon.config import load_config, DEFAULT_CONFIG
+    save_config({"server_url": DEFAULT_CONFIG["server_url"]})
+    server = load_config()["server_url"]
     try:
-        resp = httpx.get(f"{server}/health", timeout=5, transport=httpx.HTTPTransport(proxy=None))
+        with httpx.Client(timeout=5, transport=httpx.HTTPTransport(proxy=None)) as c:
+            resp = c.get(f"{server}/health")
         if resp.status_code == 200:
-            console.print(f"  [green]✓ Connected to {server}[/]")
+            console.print(f"  [green]✓ Connected to server[/]")
         else:
             console.print(f"  [red]✗ Server returned {resp.status_code}[/]")
     except Exception:
-        console.print(f"  [yellow]⚠ Cannot reach {server}[/]")
-    save_config({"server_url": server})
-
-    # Step 3: Auto-authenticate with server
-    console.print()
+        console.print(f"  [yellow]⚠ Cannot reach server[/]")
     try:
         from axon.api import _ensure_auth
         _ensure_auth()
-        console.print("  [green]✓ Authenticated with server[/]")
+        console.print("  [green]✓ Authenticated[/]")
     except Exception:
         console.print("  [yellow]⚠ Could not authenticate (server may be offline)[/]")
 
@@ -132,7 +128,7 @@ def onboard():
     import shutil
     console.print()
     backend_list = [
-        ("litellm",    "LiteLLM API (Anthropic/OpenAI/DeepSeek/Ollama)"),
+        ("litellm",    "API (Anthropic / OpenAI / DeepSeek / Ollama)"),
         ("claude-cli", "Claude Code CLI (agentic — tools, search, code exec)"),
         ("codex-cli",  "OpenAI Codex CLI (agentic — code exec, search)"),
     ]
@@ -157,61 +153,8 @@ def onboard():
     if chosen_backend in ("claude-cli", "codex-cli"):
         console.print(f"\n  [dim]Using {chosen_backend} — API keys and model managed by the CLI tool.[/]")
     else:
-        # Step 5: LLM Provider (arrow-key select)
         console.print()
-        provider_list = [
-            ("anthropic", "Anthropic (Claude)"),
-            ("openai",    "OpenAI (GPT / o-series)"),
-            ("deepseek",  "DeepSeek (Chat / Reasoner)"),
-            ("ollama",    "Ollama (local models)"),
-        ]
-        idx = _select("  Select LLM provider:\n", [label for _, label in provider_list])
-        if idx is None:
-            idx = 0
-        provider, provider_label = provider_list[idx]
-        console.print(f"  [green]✓ {provider_label}[/]\n")
-
-        # Step 6: API Key (visible) + fetch models
-        from axon.providers import fetch_models
-
-        if provider != "ollama":
-            import os
-            env_names = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}
-            env_key = env_names.get(provider, "")
-            existing_key = os.environ.get(env_key, "") if env_key else ""
-
-            if existing_key:
-                preview = f"{existing_key[:8]}...{existing_key[-4:]}"
-                console.print(f"  Found [cyan]{env_key}[/] in environment: [dim]{preview}[/]")
-                if typer.confirm("Use this key?", default=True):
-                    api_key = existing_key
-                else:
-                    api_key = typer.prompt(f"Enter {env_key}")
-            else:
-                api_key = typer.prompt(f"Enter {env_key or 'API key'}")
-
-            save_config({"api_keys": {provider: api_key}})
-            key_preview = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key
-            console.print(f"  [green]✓ Key saved[/] [dim]({key_preview})[/]\n")
-
-            console.print("  Fetching models from API...")
-            try:
-                models = fetch_models(provider, api_key)
-            except Exception:
-                models = []
-
-            _pick_model(models, provider, save_config)
-        else:
-            api_base = typer.prompt("Ollama API base", default="http://localhost:11434")
-            save_config({"api_base": api_base})
-
-            console.print("  Fetching local models...")
-            try:
-                models = fetch_models("ollama", "", api_base)
-            except Exception:
-                models = []
-
-            _pick_model(models, "ollama", save_config)
+        _configure_api_backend()
 
     # Done
     from axon.wallet import get_address
@@ -219,6 +162,79 @@ def onboard():
     console.print(f"  Wallet: [cyan]{get_address()}[/]\n")
     console.print("  Run [green]axon tasks[/] to see available tasks.")
     console.print("  Run [green]axon mine[/] to start mining.\n")
+
+
+def _configure_api_backend():
+    """Interactive provider → API key → model selection for API backend."""
+    from axon.config import load_config, save_config
+    from axon.providers import fetch_models
+
+    config = load_config()
+
+    # Provider selection
+    provider_list = [
+        ("anthropic", "Anthropic (Claude)"),
+        ("openai",    "OpenAI (GPT / o-series)"),
+        ("deepseek",  "DeepSeek (Chat / Reasoner)"),
+        ("ollama",    "Ollama (local models)"),
+    ]
+    current_model = config.get("default_model", "")
+    current_provider = current_model.split("/")[0] if "/" in current_model else ""
+    cursor = next((i for i, (pid, _) in enumerate(provider_list) if pid == current_provider), 0)
+    idx = _select("  Select LLM provider:\n", [label for _, label in provider_list], cursor_index=cursor)
+    if idx is None:
+        return
+    provider, provider_label = provider_list[idx]
+    console.print(f"  [green]✓ {provider_label}[/]\n")
+
+    # API key
+    if provider != "ollama":
+        import os
+        env_names = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}
+        env_var = env_names.get(provider, "")
+        keys = config.get("api_keys", {})
+        saved_key = keys.get(provider, "")
+        env_key = os.environ.get(env_var, "") if env_var else ""
+
+        if saved_key:
+            preview = f"{saved_key[:8]}...{saved_key[-4:]}" if len(saved_key) > 12 else saved_key
+            console.print(f"  Saved key: [dim]{preview}[/]")
+            if not typer.confirm("  Use saved key?", default=True):
+                api_key = typer.prompt(f"  Enter {env_var or 'API key'}")
+                save_config({"api_keys": {provider: api_key}})
+                console.print(f"  [green]✓ Key saved[/]")
+            else:
+                api_key = saved_key
+        elif env_key:
+            preview = f"{env_key[:8]}...{env_key[-4:]}"
+            console.print(f"  Found [cyan]{env_var}[/] in environment: [dim]{preview}[/]")
+            if typer.confirm("  Use this key?", default=True):
+                api_key = env_key
+            else:
+                api_key = typer.prompt(f"  Enter {env_var}")
+            save_config({"api_keys": {provider: api_key}})
+            console.print(f"  [green]✓ Key saved[/]")
+        else:
+            api_key = typer.prompt(f"  Enter {env_var or 'API key'}")
+            save_config({"api_keys": {provider: api_key}})
+            console.print(f"  [green]✓ Key saved[/]\n")
+
+        console.print("  Fetching models...")
+        try:
+            models = fetch_models(provider, api_key)
+        except Exception:
+            models = []
+        _pick_model(models, provider, save_config)
+    else:
+        api_base = config.get("api_base", "") or "http://localhost:11434"
+        api_base = typer.prompt("  Ollama API base", default=api_base)
+        save_config({"api_base": api_base})
+        console.print("  Fetching local models...")
+        try:
+            models = fetch_models("ollama", "", api_base)
+        except Exception:
+            models = []
+        _pick_model(models, "ollama", save_config)
 
 
 def _pick_model(models: list[dict], provider: str, save_config):
@@ -344,11 +360,14 @@ def model(name: str = ""):
 # --- Backend ---
 
 @app.command()
-def backend(name: str = typer.Argument("", help="Backend name: auto, litellm, claude-cli, codex-cli")):
-    """Show or switch mining backend (auto, litellm, claude-cli, codex-cli)."""
+def backend(name: str = typer.Argument("", help="Backend name: auto, api, claude-cli, codex-cli")):
+    """Show or switch mining backend (auto, api, claude-cli, codex-cli)."""
     import shutil
     from axon.backends import auto_detect_backend
     from axon.config import load_config, save_config
+
+    if name == "api":
+        name = "litellm"
 
     config = load_config()
     current = config.get("backend", "auto")
@@ -357,7 +376,7 @@ def backend(name: str = typer.Argument("", help="Backend name: auto, litellm, cl
         ("auto",       "Auto (claude-cli > codex-cli > litellm)"),
         ("claude-cli", "Claude Code CLI (agentic — tools, search, code exec)"),
         ("codex-cli",  "OpenAI Codex CLI (agentic — code exec, search)"),
-        ("litellm",    "LiteLLM (API: Anthropic/OpenAI/DeepSeek/Ollama)"),
+        ("litellm",    "API (Anthropic / OpenAI / DeepSeek / Ollama)"),
     ]
 
     if name:
@@ -370,6 +389,9 @@ def backend(name: str = typer.Argument("", help="Backend name: auto, litellm, cl
         save_config({"backend": name})
         resolved = auto_detect_backend() if name == "auto" else name
         console.print(f"  [green]✓ Backend: {name}[/]" + (f" [dim](→ {resolved})[/]" if name == "auto" else ""))
+        if name == "litellm":
+            console.print()
+            _configure_api_backend()
         return
 
     resolved = auto_detect_backend() if current == "auto" else current
@@ -396,6 +418,10 @@ def backend(name: str = typer.Argument("", help="Backend name: auto, litellm, cl
     save_config({"backend": chosen})
     resolved = auto_detect_backend() if chosen == "auto" else chosen
     console.print(f"  [green]✓ Backend: {chosen}[/]" + (f" [dim](→ {resolved})[/]" if chosen == "auto" else ""))
+
+    if chosen == "litellm":
+        console.print()
+        _configure_api_backend()
 
 
 def _check_cli_available(backend_name: str, shutil):

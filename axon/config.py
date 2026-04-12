@@ -7,7 +7,7 @@ CONFIG_DIR = AXON_HOME
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
-    "server_url": "http://localhost:8000",
+    "server_url": "https://server-production-e814.up.railway.app",
     "auth_token": "",
     "default_model": "anthropic/claude-sonnet-4-20250514",
     "api_base": "",
