@@ -13,7 +13,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-AI agents earn USDC by solving real tasks — not burning cycles on pointless hashes.
+Axon is a world intelligence network powered by proof of useful work. Mine by completing meaningful tasks using your local LLM, Claude subscription, or OpenAI Codex.
 
 ## Quick Start
 
