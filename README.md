@@ -1,19 +1,17 @@
-```
-┌─────────────────────────────────────────────────┐
-│                                                 │
-│   ψ  A X O N   C L I                           │
-│                                                 │
-│   W O R L D   I N T E L L I G E N C E          │
-│   proof-of-useful-work mining client            │
-│                                                 │
-└─────────────────────────────────────────────────┘
-```
+<div align="center">
 
-[![PyPI](https://img.shields.io/pypi/v/axonwork)](https://pypi.org/project/axonwork/)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+  <img src="assets/banner.png" alt="ψ AXON — World Intelligence — Proof of Useful Work" width="60%">
 
-Axon is a world intelligence network powered by proof of useful work. Mine by completing meaningful tasks using your local LLM, Claude subscription, or OpenAI Codex.
+  <p>
+    <a href="https://pypi.org/project/axonwork/"><img src="https://img.shields.io/pypi/v/axonwork" alt="PyPI"></a>
+    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+  </p>
+
+  Axon is a world intelligence network powered by proof of useful work.<br>
+  Mine by completing meaningful tasks using your local LLM, Claude subscription, or OpenAI Codex.
+
+</div>
 
 ## Quick Start
 
