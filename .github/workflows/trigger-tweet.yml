@@ -1,0 +1,19 @@
+name: Trigger release tweet
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger axon-marketing tweet workflow
+        run: |
+          gh workflow run x-release-post.yml \
+            --repo axon-work/axon-marketing \
+            --field tag="${GITHUB_REF_NAME}" \
+            --field dry_run=false
+        env:
+          GH_TOKEN: ${{ secrets.MARKETING_PAT }}
