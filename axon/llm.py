@@ -15,14 +15,11 @@ def build_prompt(task, my_best_answer, my_best_score, platform_best_score, last_
     prompt += f"Platform best: {platform_best_score if platform_best_score is not None else 'None (no submissions yet)'}\n"
 
     if community_subs:
-        prompt += "\n## Community Submissions (top answers from other miners)\n"
+        prompt += "\n## Community Submissions (top scores from other miners)\n"
         for i, sub in enumerate(community_subs[:3], 1):
             score = sub.get("score")
             score_str = f"{score:.4f}" if score is not None else "N/A"
-            prompt += f"\n### Submission #{i} (score: {score_str})\n"
-            if sub.get("answer"):
-                answer_preview = sub["answer"][:2000]
-                prompt += f"```\n{answer_preview}\n```\n"
+            prompt += f"  #{i}  score: {score_str}\n"
 
     if my_past_subs:
         recent_subs = my_past_subs[-10:]
@@ -73,6 +70,13 @@ def build_prompt(task, my_best_answer, my_best_score, platform_best_score, last_
             "3. The evaluator writes your submission directly to solution.py and executes it.\n"
             "4. Inside <answer>, include ONLY raw executable Python code.\n"
             "5. Do NOT include XML tags, prose, or markdown fences inside the submitted code.\n\n"
+            "## Code Restrictions (enforced by sandbox)\n"
+            "- Banned imports: os, subprocess, sys, shutil, signal, ctypes, socket, http, "
+            "urllib, requests, httpx, importlib, pickle, shelve, marshal, multiprocessing, "
+            "threading, concurrent, pathlib\n"
+            "- Banned calls: eval(), exec(), compile(), __import__()\n"
+            "- Max code size: 5MB\n"
+            "- Code that violates these restrictions will be rejected with score 0.\n\n"
         )
 
     prompt += f"## OUTPUT FORMAT\n<thinking>your reasoning</thinking>\n<answer>{'RAW EXECUTABLE PYTHON CODE ONLY' if is_code else 'your answer'}</answer>\n"
@@ -95,14 +99,11 @@ def build_agent_prompt(task, my_best_answer, my_best_score, platform_best_score,
     prompt += f"Platform best: {platform_best_score if platform_best_score is not None else 'None (no submissions yet)'}\n"
 
     if community_subs:
-        prompt += "\n## Community Submissions (top answers from other miners)\n"
+        prompt += "\n## Community Submissions (top scores from other miners)\n"
         for i, sub in enumerate(community_subs[:3], 1):
             score = sub.get("score")
             score_str = f"{score:.4f}" if score is not None else "N/A"
-            prompt += f"\n### Submission #{i} (score: {score_str})\n"
-            if sub.get("answer"):
-                answer_preview = sub["answer"][:2000]
-                prompt += f"```\n{answer_preview}\n```\n"
+            prompt += f"  #{i}  score: {score_str}\n"
 
     if my_past_subs:
         recent_subs = my_past_subs[-10:]
@@ -155,6 +156,13 @@ def build_agent_prompt(task, my_best_answer, my_best_score, platform_best_score,
             "4. Your final answer must be raw executable Python code only.\n"
             "5. Do NOT wrap it in XML tags, markdown fences, or prose.\n"
             "6. The evaluator writes your submission directly to solution.py and executes it.\n\n"
+            "## Code Restrictions (enforced by sandbox)\n"
+            "- Banned imports: os, subprocess, sys, shutil, signal, ctypes, socket, http, "
+            "urllib, requests, httpx, importlib, pickle, shelve, marshal, multiprocessing, "
+            "threading, concurrent, pathlib\n"
+            "- Banned calls: eval(), exec(), compile(), __import__()\n"
+            "- Max code size: 5MB\n"
+            "- Code that violates these restrictions will be rejected with score 0.\n\n"
         )
     elif eval_type == "llm_judge":
         prompt += "\n## APPROACH\nUse WebSearch and WebFetch to research the topic. Verify facts before answering.\n\n"

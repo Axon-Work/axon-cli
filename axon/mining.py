@@ -11,7 +11,8 @@ from rich.live import Live
 from axon.api import api_get, api_post
 from axon.backends import create_backend
 from axon.config import AXON_HOME, load_config
-from axon.display import console, build_mining_panel, fmt_round, print_mining_summary, _fmt_usdc, BRAILLE_FRAMES
+from axon.theme import console, branded_title
+from axon.display import build_mining_panel, fmt_round, print_mining_summary, _fmt_usdc, BRAILLE_FRAMES
 from axon.history import merge_server_history, build_local_record, build_error_record, append_record
 from axon.llm import build_prompt, build_agent_prompt
 from axon.session import load_session, save_session, delete_session
@@ -139,6 +140,10 @@ class MiningDisplay:
         self.all_details: list[dict] = []
         self.community_subs: list[dict] = []
         self.my_miner_id: str = ""
+        self.max_rounds: int = 0
+        self.budget: float = 0
+        self.timeout: int = 0
+        self.completion_reward_pct: int = 50
         self.call_started_at: float | None = None
 
     def __rich_console__(self, rconsole, options):
@@ -166,6 +171,8 @@ class MiningDisplay:
             total_tokens=self.total_tokens, total_cost=self.total_cost, billing_mode=self.billing_mode,
             community_subs=self.community_subs,
             my_miner_id=self.my_miner_id,
+            max_rounds=self.max_rounds, budget=self.budget, timeout=self.timeout,
+            completion_reward_pct=self.completion_reward_pct,
         )
 
     def __rich_measure__(self, rconsole, options):
@@ -173,7 +180,7 @@ class MiningDisplay:
         return Measurement(40, options.max_width)
 
 
-def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None | object = _UNSET):
+def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None | object = _UNSET, budget: float = 0):
     """Mining loop: rounds scroll above, status panel stays at bottom."""
     config = load_config()
     backend_config = dict(config)
@@ -224,12 +231,16 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
     state.task_title = task["title"]
     state.model = backend.display_name()
     state.pool = task.get("pool_balance", 0)
+    state.completion_reward_pct = task.get("completion_reward_pct", 50)
     state.threshold = task.get("completion_threshold", 0)
     state.best_score = my_best_score
     state.total_earned = total_earned
     state.round_count = round_num
     state.rounds = rounds_data
     state.billing_mode = "subscription" if backend.name in ("codex-cli", "claude-cli") else "metered"
+    state.max_rounds = max_rounds
+    state.budget = budget
+    state.timeout = 0 if cli_timeout_override is None else (cli_timeout_override if cli_timeout_override is not _UNSET else 0)
 
     # Get my miner ID for community leaderboard highlighting
     try:
@@ -265,16 +276,17 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
         with Live(state, console=console, refresh_per_second=4) as live:
             while True:
                 round_num += 1
+                _budget_exceeded = False
                 if max_rounds > 0 and round_num > max_rounds:
                     break
 
                 # LLM stuck
                 if consecutive_dups >= 3:
-                    console.print("  [yellow]3 consecutive duplicates — stopping.[/]")
+                    console.print("  [warning]3 consecutive duplicates — stopping.[/]")
                     break
 
                 state.round_count = round_num
-                state.status = f"[dim]► Round {round_num}  calling {backend.display_name()}...[/]"
+                state.status = f"[secondary]► Round {round_num}  calling {backend.display_name()}...[/]"
                 round_started_at = _now_iso()
                 round_started_mono = time.monotonic()
                 log.info(
@@ -331,6 +343,8 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         total_cost = None
                     state.total_tokens = total_tokens
                     state.total_cost = total_cost
+                    # Budget check — submit this round's answer before stopping
+                    _budget_exceeded = (budget > 0 and total_cost is not None and total_cost >= budget)
                     log.info(
                         "Round %d backend_done task=%s finished_at=%s duration_s=%.2f answer_chars=%d thinking_chars=%d billing_mode=%s total_tokens=%s cost_usd=%s",
                         round_num,
@@ -363,13 +377,13 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         exc_info=True,
                     )
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                        console.print(f"  [warning]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
                         break
                     sleep_time = 10 if isinstance(e, TimeoutError) else 2
                     time.sleep(sleep_time)
                     continue
 
-                state.status = f"[dim]► Round {round_num}  submitting...[/]"
+                state.status = f"[secondary]► Round {round_num}  submitting...[/]"
                 state.call_started_at = time.monotonic()
 
                 # --- Submit to task ---
@@ -381,6 +395,15 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                 except httpx.HTTPStatusError as e:
                     state.call_started_at = None
                     code = e.response.status_code
+                    if code == 402:
+                        detail_msg = ""
+                        try:
+                            detail_msg = e.response.json().get("detail", "")
+                        except Exception:
+                            pass
+                        console.print(f"  [warning]Insufficient balance for GPU eval. {detail_msg}[/]")
+                        console.print(f"  [secondary]Mine CPU tasks first or deposit USDC to continue.[/]")
+                        break
                     if code == 429:
                         import re
                         detail_msg = e.response.json().get("detail", "")
@@ -393,7 +416,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         state.all_details.append({"score": None, "result": "rate limited", "earned": 0,
                                                   "error": detail_msg, "eval_details": None, "answer": answer, "thinking": thinking})
                         watcher.detail_count = len(state.all_details)
-                        state.status = f"[dim yellow]► rate limited, waiting {wait}s...[/]"
+                        state.status = f"[warning]► rate limited, waiting {wait}s...[/]"
                         log.warning(
                             "Round %d end task=%s status=rate_limited finished_at=%s duration_s=%.2f wait_s=%d detail=%s",
                             round_num,
@@ -451,7 +474,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                             error_msg,
                         )
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                            console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                            console.print(f"  [warning]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
                             break
                         continue
                     if code == 400:
@@ -461,10 +484,10 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         except Exception:
                             pass
                         if "completed" in detail_msg or "closed" in detail_msg:
-                            console.print(f"  [yellow]Task is no longer open. Stopping.[/]")
+                            console.print(f"  [warning]Task is no longer open. Stopping.[/]")
                             break
                     if code == 404:
-                        console.print("  [yellow]Task not found. Stopping.[/]")
+                        console.print("  [warning]Task not found. Stopping.[/]")
                         break
                     # Log response body for debugging
                     consecutive_errors += 1
@@ -493,7 +516,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         resp_detail,
                     )
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                        console.print(f"  [warning]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
                         break
                     time.sleep(2)
                     continue
@@ -519,7 +542,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         exc_info=True,
                     )
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                        console.print(f"  [warning]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
                         break
                     time.sleep(2)
                     continue
@@ -529,7 +552,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
 
                 if sub.get("eval_status") == "pending":
                     state.call_started_at = time.monotonic()
-                    state.status = f"[dim]► Round {round_num}  evaluating...[/]"
+                    state.status = f"[secondary]► Round {round_num}  evaluating...[/]"
                     poll_interval = 1
                     max_wait = 120
                     waited = 0
@@ -553,7 +576,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         state.status = ""
                         log.warning("Round %d eval timeout task=%s", round_num, task_id)
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                            console.print(f"  [yellow]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
+                            console.print(f"  [warning]{MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping.[/]")
                             break
                         continue
 
@@ -630,26 +653,32 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                 try:
                     task_check = api_get(f"/api/tasks/{task_id}", auth=False)
                     state.pool = task_check.get("pool_balance", state.pool)
+                    state.completion_reward_pct = task_check.get("completion_reward_pct", state.completion_reward_pct)
                     task_status = task_check.get("status", "open")
                 except Exception:
                     task_status = "open"
 
                 if is_completion:
                     delete_session(session_key)
-                    state.status = f"[bold green]✓ Task completed! Earned {_fmt_usdc(total_earned)}[/]"
+                    state.status = f"[result.complete]✓ Task completed! Earned {_fmt_usdc(total_earned)}[/]"
                     time.sleep(1)
                     break
 
                 # Task closed by pool exhaustion or admin
                 if task_status != "open":
                     delete_session(session_key)
-                    console.print("  [yellow]Task ended. Stopping.[/]")
+                    console.print("  [warning]Task ended. Stopping.[/]")
+                    break
+
+                # Budget exceeded — stop after submitting this round
+                if _budget_exceeded:
+                    console.print(f"  [warning]Budget limit reached (${budget:.2f}). Stopping.[/]")
                     break
 
                 state.status = ""
 
     except KeyboardInterrupt:
-        console.print("\n  [yellow]Mining stopped. Session saved — run again to resume.[/]")
+        console.print("\n  [warning]Mining stopped. Session saved — run again to resume.[/]")
     finally:
         watcher.stop()
         if old_tty is not None:
@@ -672,8 +701,8 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
         else:
             token_str = f"{(total_tokens or 0):,}"
             cost_str = f"${total_cost:.4f}" if total_cost else "$0"
-        console.print(f"\n  [bold gold1]ψ Mining Summary[/]")
+        console.print(f"\n  {branded_title('Mining Summary')}")
         console.print(f"  Best:    {best}")
-        console.print(f"  Earned:  [green]{_fmt_usdc(total_earned)}[/]")
-        console.print(f"  Tokens:  {token_str}  Cost: [yellow]{cost_str}[/]")
+        console.print(f"  Earned:  [money]{_fmt_usdc(total_earned)}[/]")
+        console.print(f"  Tokens:  {token_str}  Cost: [warning]{cost_str}[/]")
         console.print(f"  Rounds:  {round_num}\n")

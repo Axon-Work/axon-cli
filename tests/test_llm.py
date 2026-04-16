@@ -109,3 +109,41 @@ def add(a, b):
     thinking, answer = _parse_response(text)
     assert "step by step" in thinking
     assert "def add" in answer
+
+
+# ---------------------------------------------------------------------------
+# Code Restrictions prompt tests
+# ---------------------------------------------------------------------------
+
+def test_build_prompt_code_restrictions():
+    """code_output prompt includes banned imports list."""
+    task = {"title": "T", "description": "D", "eval_type": "code_output",
+            "direction": "maximize", "completion_threshold": -380}
+    prompt = build_prompt(task, None, None, None)
+    assert "Banned imports" in prompt
+    assert "os, subprocess" in prompt
+    assert "eval(), exec(), compile()" in prompt
+    assert "5MB" in prompt
+
+
+def test_build_agent_prompt_code_restrictions():
+    task = {"title": "T", "description": "D", "eval_type": "code_output",
+            "direction": "maximize", "completion_threshold": -380}
+    prompt = build_agent_prompt(task, None, None, None)
+    assert "Banned imports" in prompt
+    assert "os, subprocess" in prompt
+
+
+def test_build_prompt_non_code_no_restrictions():
+    """Non code_output tasks should not contain Code Restrictions."""
+    task = {"title": "T", "description": "D", "eval_type": "exact_match",
+            "direction": "maximize", "completion_threshold": 1.0}
+    prompt = build_prompt(task, None, None, None)
+    assert "Banned imports" not in prompt
+
+
+def test_build_agent_prompt_non_code_no_restrictions():
+    task = {"title": "T", "description": "D", "eval_type": "numeric",
+            "direction": "maximize", "completion_threshold": 1.0}
+    prompt = build_agent_prompt(task, None, None, None)
+    assert "Banned imports" not in prompt

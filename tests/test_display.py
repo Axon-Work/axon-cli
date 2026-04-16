@@ -259,7 +259,8 @@ def test_truncate_answer_newlines_and_long():
     assert result.endswith("\u2026")
 
 
-def test_fmt_community_with_answer_preview():
+def test_fmt_community_no_answer_preview():
+    """Answer preview removed — community leaderboard only shows scores."""
     subs = [
         {"miner_id": "aaaa1111-bbbb-cccc-dddd-eeee2222ffff", "score": 0.95,
          "llm_model_used": "anthropic/claude-sonnet", "created_at": "",
@@ -270,9 +271,9 @@ def test_fmt_community_with_answer_preview():
     ]
     lines = display._fmt_community(subs, my_miner_id="1111aaaa-2222-3333-4444-5555bbbb6666")
     text = "\n".join(lines)
-    assert "def solve(): return 42" in text      # newline collapsed, preview shown
-    assert "\u201c" in text                       # curly quote present
-    assert "The answer is 42" not in text         # me entry — no preview
+    assert "def solve()" not in text             # answer preview removed
+    assert "\u201c" not in text                   # no curly quotes
+    assert "0.9500" in text                       # score still shown
 
 
 def test_fmt_community_no_answer_field():
@@ -284,13 +285,14 @@ def test_fmt_community_no_answer_field():
     assert "\u201c" not in text  # no quote = no preview
 
 
-def test_fmt_community_escapes_rich_markup():
+def test_fmt_community_no_answer_no_markup_leak():
+    """With answer preview removed, Rich markup in answers can't leak."""
     subs = [{"miner_id": "aaaa1111-bbbb-cccc-dddd-eeee2222ffff", "score": 0.95,
              "llm_model_used": "m", "created_at": "",
              "answer": "[bold red]evil[/]"}]
     lines = display._fmt_community(subs, my_miner_id="other")
     text = "\n".join(lines)
-    assert "\\[bold red]" in text  # escaped, not interpreted
+    assert "bold red" not in text  # answer not shown at all
 
 
 def test_build_mining_panel_with_community():
@@ -307,7 +309,7 @@ def test_build_mining_panel_with_community():
     out = _render_panel(panel)
     assert "Leaderboard" in out
     assert "1 miners" in out
-    assert "Hello world solution" in out
+    assert "Hello world solution" not in out  # answer preview removed
 
 
 def test_build_mining_panel_details_hidden():
