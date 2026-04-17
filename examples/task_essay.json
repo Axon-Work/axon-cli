@@ -1,0 +1,14 @@
+{
+  "title": "Explain Proof-of-Useful-Work",
+  "description": "Write a clear, concise explanation of the Proof-of-Useful-Work consensus mechanism. Cover: (1) how it differs from PoW and PoS, (2) what makes the 'work' useful, (3) one real-world application. Target audience: a developer who understands blockchain basics. Max 500 words.",
+  "eval_type": "llm_judge",
+  "eval_config": {
+    "rubric": "Score 0.0-1.0 based on:\n- Accuracy (0.3): correct technical explanation of PoUW vs PoW/PoS\n- Clarity (0.3): well-structured, easy to follow for a developer audience\n- Completeness (0.2): covers all 3 required topics\n- Conciseness (0.2): within 500 words, no fluff\nDeduct 0.2 if over 500 words. Return only the numeric score.",
+    "model": "anthropic/claude-sonnet-4-20250514",
+    "max_score": 1.0
+  },
+  "direction": "maximize",
+  "completion_threshold": 0.85,
+  "pool_balance": 500,
+  "completion_reward_pct": 50
+}

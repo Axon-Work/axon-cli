@@ -34,7 +34,7 @@ def _write_prompt_snapshot(task_id: str, round_num: int, prompt: str) -> Path | 
         path = PROMPT_LOG_DIR / f"{task_id}-round{round_num:03d}-{stamp}.txt"
         path.write_text(prompt, encoding="utf-8")
         return path
-    except Exception:
+    except OSError:
         log.exception("Failed to write prompt snapshot task=%s round=%d", task_id, round_num)
         return None
 
@@ -70,7 +70,7 @@ class KeyWatcher:
         try:
             if not sys.stdin.isatty():
                 return
-        except Exception:
+        except (OSError, ValueError):
             return
         import threading
         self._stop_event = threading.Event()
@@ -82,7 +82,7 @@ class KeyWatcher:
         fd = sys.stdin.fileno()
         try:
             old = termios.tcgetattr(fd)
-        except Exception:
+        except (OSError, termios.error):
             return
         try:
             # cbreak + disable IEXTEN so ctrl+o isn't swallowed as DISCARD
@@ -107,12 +107,12 @@ class KeyWatcher:
                                 self.detail_idx = max(0, self.detail_idx - 1)
                             elif seq == b'[C' and self._show:  # right
                                 self.detail_idx = min(self.detail_count - 1, self.detail_idx + 1)
-        except Exception:
-            pass
+        except (OSError, termios.error):
+            log.debug("KeyWatcher terminal I/O error", exc_info=True)
         finally:
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            except Exception:
+            except (OSError, termios.error):
                 pass
 
     def stop(self):
@@ -204,7 +204,8 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
     # Get best info
     try:
         best_info = api_get(f"/api/tasks/{task_id}/submissions/best", auth=False)
-    except Exception:
+    except httpx.HTTPError:
+        log.debug("Failed to fetch best submission info for %s", task_id, exc_info=True)
         best_info = {}
 
     my_best_answer = None
@@ -246,15 +247,16 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
     try:
         me_info = api_get("/api/auth/me")
         state.my_miner_id = str(me_info.get("id", ""))
-    except Exception:
+    except httpx.HTTPError:
+        log.debug("Failed to fetch /me for miner id", exc_info=True)
         state.my_miner_id = ""
 
     # Load local history + merge server submissions (dedup)
     server_subs = []
     try:
         server_subs = api_get(f"/api/tasks/{task_id}/submissions/mine")
-    except Exception:
-        pass
+    except httpx.HTTPError:
+        log.debug("Failed to fetch my submissions; local history only", exc_info=True)
     my_past_subs = merge_server_history(task_id, server_subs)
 
     last_feedback = None
@@ -267,7 +269,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
         if sys.stdin.isatty():
             import termios
             old_tty = termios.tcgetattr(sys.stdin.fileno())
-    except Exception:
+    except (OSError, ValueError, ImportError):
         pass
 
     try:
@@ -305,7 +307,8 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         all_subs = api_get(f"/api/tasks/{task_id}/submissions?limit=10", auth=False)
                         community_subs = [s for s in all_subs if s.get("score") is not None and s.get("is_improvement")]
                         community_subs.sort(key=lambda s: s.get("score", 0), reverse=(task.get("direction") == "maximize"))
-                    except Exception:
+                    except httpx.HTTPError:
+                        log.debug("Failed to fetch community submissions", exc_info=True)
                         all_subs = []
                         community_subs = []
 
@@ -399,7 +402,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         detail_msg = ""
                         try:
                             detail_msg = e.response.json().get("detail", "")
-                        except Exception:
+                        except (ValueError, AttributeError):
                             pass
                         console.print(f"  [warning]Insufficient balance for GPU eval. {detail_msg}[/]")
                         console.print(f"  [secondary]Mine CPU tasks first or deposit USDC to continue.[/]")
@@ -453,7 +456,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         detail_msg = ""
                         try:
                             detail_msg = e.response.text[:500]
-                        except Exception:
+                        except (ValueError, AttributeError):
                             pass
                         error_msg = f"422 validation error: {detail_msg}" if detail_msg else str(e)
                         record = build_error_record(task_id, answer, thinking,
@@ -481,7 +484,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         detail_msg = ""
                         try:
                             detail_msg = e.response.json().get("detail", "")
-                        except Exception:
+                        except (ValueError, AttributeError):
                             pass
                         if "completed" in detail_msg or "closed" in detail_msg:
                             console.print(f"  [warning]Task is no longer open. Stopping.[/]")
@@ -494,7 +497,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                     resp_detail = ""
                     try:
                         resp_detail = e.response.text[:500]
-                    except Exception:
+                    except (ValueError, AttributeError):
                         pass
                     error_msg = f"{e} — {resp_detail}" if resp_detail else str(e)
                     record = build_error_record(task_id, answer, thinking,
@@ -561,8 +564,8 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                         waited += poll_interval
                         try:
                             sub = api_get(f"/api/tasks/{task_id}/submissions/{sub['id']}")
-                        except Exception:
-                            pass  # network hiccup, keep polling
+                        except httpx.HTTPError:
+                            log.debug("Poll hiccup for submission %s", sub.get("id"), exc_info=True)
 
                     state.call_started_at = None  # clear eval timer
 
@@ -655,7 +658,8 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
                     state.pool = task_check.get("pool_balance", state.pool)
                     state.completion_reward_pct = task_check.get("completion_reward_pct", state.completion_reward_pct)
                     task_status = task_check.get("status", "open")
-                except Exception:
+                except httpx.HTTPError:
+                    log.debug("Failed to refresh task state", exc_info=True)
                     task_status = "open"
 
                 if is_completion:
@@ -685,7 +689,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
             try:
                 import termios
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_tty)
-            except Exception:
+            except (OSError, ValueError, ImportError):
                 pass
 
     # --- Summary ---

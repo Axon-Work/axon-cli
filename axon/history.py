@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from axon._fs import atomic_append_jsonl
 from axon.config import AXON_HOME
 
 HISTORY_DIR = AXON_HOME / "history"
@@ -29,10 +30,7 @@ def load_history(task_id: str) -> list[dict]:
 
 def append_record(task_id: str, record: dict):
     """Append a single JSON record to the task's history file."""
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    path = HISTORY_DIR / f"{task_id}.jsonl"
-    with open(path, "a") as f:
-        f.write(json.dumps(record, default=str) + "\n")
+    atomic_append_jsonl(HISTORY_DIR / f"{task_id}.jsonl", record)
 
 
 def merge_server_history(task_id: str, server_subs: list[dict]) -> list[dict]:

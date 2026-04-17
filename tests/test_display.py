@@ -4,13 +4,19 @@ from io import StringIO
 from rich.console import Console
 
 from axon import display
+from axon.theme import AXON_THEME
 
 
 def _capture(fn, *args, **kwargs) -> str:
-    """Run a display function with a captured console, return output text."""
+    """Run a display function with a captured console, return output text.
+
+    Passes AXON_THEME so `[secondary]`, `[accent]`, `[money]` and other
+    semantic styles resolve correctly — without it, Rich treats the style
+    names as color names and raises MissingStyle.
+    """
     buf = StringIO()
     orig = display.console
-    display.console = Console(file=buf, no_color=True, width=120)
+    display.console = Console(file=buf, no_color=True, width=120, theme=AXON_THEME)
     try:
         fn(*args, **kwargs)
     finally:

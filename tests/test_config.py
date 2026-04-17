@@ -10,7 +10,7 @@ from axon.config import load_config, save_config, get_token, DEFAULT_CONFIG, res
 def test_load_default_config(tmp_path):
     with patch("axon.config.CONFIG_FILE", tmp_path / "nonexistent.json"):
         config = load_config()
-        assert config["server_url"] == "http://localhost:8000"
+        assert config["server_url"] == DEFAULT_CONFIG["server_url"]
         assert config["auth_token"] == ""
         assert config["api_keys"] == {}
 
@@ -23,7 +23,7 @@ def test_save_and_load(tmp_path):
         config = load_config()
         assert config["auth_token"] == "test-jwt"
         assert config["default_model"] == "openai/gpt-4o"
-        assert config["server_url"] == "http://localhost:8000"  # default preserved
+        assert config["server_url"] == DEFAULT_CONFIG["server_url"]  # default preserved
 
 
 def test_save_api_keys_merge(tmp_path):
