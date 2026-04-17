@@ -1,0 +1,14 @@
+{
+  "title": "Approximate Pi",
+  "description": "Write a Python function solve() that returns an approximation of Pi (3.14159265...). You may NOT import math or use any hardcoded Pi constant. Your score is based on how close your result is to the true value — closer = higher score. The scoring formula: score = max(0, 1 - abs(result - pi) * 1000).",
+  "eval_type": "code_output",
+  "eval_config": {
+    "setup_code": "import sys, math\ntry:\n    from solution import solve\n    result = float(solve())\n    score = max(0.0, 1.0 - abs(result - math.pi) * 1000)\n    print(f'SCORE:{score:.6f}')\nexcept Exception as e:\n    print('SCORE:0')\n    print(f'Error: {e}', file=sys.stderr)",
+    "score_prefix": "SCORE:",
+    "timeout": 30
+  },
+  "direction": "maximize",
+  "completion_threshold": 0.99,
+  "pool_balance": 500,
+  "completion_reward_pct": 30
+}

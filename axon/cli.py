@@ -526,6 +526,29 @@ def mine(
             return
         task = task_list[idx]
 
+    # Pre-check: GPU tasks charge an eval fee per submission. If the user's
+    # platform balance is too low, the first submission fails with 402 and
+    # the user has wasted time setting up. Warn early.
+    gpu_type = (task.get("eval_config") or {}).get("gpu")
+    if gpu_type:
+        # Server fees: T4=1, A100=5, A100-80GB=5, H100=10 (USDC cents)
+        gpu_fees = {"T4": 1, "A100": 5, "A100-80GB": 5, "H100": 10}
+        expected_fee = gpu_fees.get(gpu_type.upper(), 10)
+        try:
+            me = _api(api_get, "/api/auth/me")
+            if me.get("balance", 0) < expected_fee:
+                console.print(
+                    f"  [warning]Insufficient balance for {gpu_type} task.[/]  "
+                    f"Each submission costs {expected_fee} cents; you have "
+                    f"{me.get('balance', 0)} cents. Run [command]axon balance[/] for details."
+                )
+                raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
+        except Exception:
+            # Non-fatal: if /me fails, let run_mining handle it
+            pass
+
     # Determine backend type
     config = load_config()
     backend_name = config.get("backend", "auto")
@@ -598,6 +621,16 @@ def balance():
     console.print()
     console.print(panel)
     console.print()
+
+    # Actionable hint when the platform balance is empty — otherwise the user
+    # sees just "$0.00" and has no idea how to proceed.
+    if me.get("balance", 0) == 0:
+        console.print(
+            "  [warning]Your platform balance is $0.[/]  "
+            "[secondary]Transfer USDC on Base to your wallet, then run "
+            "`axon deposit` (coming soon) or mine tasks that pay in $AXN.[/]"
+        )
+        console.print()
 
 
 def _fetch_base_balances(address: str) -> dict:

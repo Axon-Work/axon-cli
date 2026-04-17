@@ -2,6 +2,8 @@ import json
 import os
 from pathlib import Path
 
+from axon._fs import atomic_write_json
+
 AXON_HOME = Path(os.environ.get("AXON_HOME", str(Path.home() / ".axon")))
 CONFIG_DIR = AXON_HOME
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -42,12 +44,11 @@ def load_config() -> dict:
 
 
 def save_config(updates: dict):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     current = load_config()
     if "api_keys" in updates:
         current["api_keys"] = {**current.get("api_keys", {}), **updates.pop("api_keys")}
     current.update(updates)
-    CONFIG_FILE.write_text(json.dumps(current, indent=2) + "\n")
+    atomic_write_json(CONFIG_FILE, current)
 
 
 def get_token() -> str:

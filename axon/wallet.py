@@ -4,6 +4,7 @@ import json
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
+from axon._fs import atomic_write_json
 from axon.config import AXON_HOME
 
 WALLET_FILE = AXON_HOME / "wallet.json"
@@ -16,10 +17,8 @@ def generate_wallet() -> dict:
 
 
 def save_wallet(wallet: dict):
-    """Save wallet to ~/.axon/wallet.json"""
-    WALLET_FILE.parent.mkdir(parents=True, exist_ok=True)
-    WALLET_FILE.write_text(json.dumps(wallet, indent=2) + "\n")
-    WALLET_FILE.chmod(0o600)  # owner-only read/write
+    """Save wallet atomically with 0o600 permissions (owner-only read/write)."""
+    atomic_write_json(WALLET_FILE, wallet, mode=0o600)
 
 
 def load_wallet() -> dict | None:
@@ -28,7 +27,7 @@ def load_wallet() -> dict | None:
         return None
     try:
         return json.loads(WALLET_FILE.read_text())
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return None
 
 
