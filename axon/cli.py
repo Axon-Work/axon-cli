@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import tempfile
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Optional
 import httpx
 import typer
@@ -12,6 +13,15 @@ from axon.display import print_banner, _fmt_usdc
 from axon.log import setup_logging
 
 setup_logging()
+
+
+def _cli_version() -> str:
+    """Return the installed package version, or a dev fallback."""
+    try:
+        return _pkg_version("axonwork")
+    except PackageNotFoundError:
+        return "dev"
+
 
 app = typer.Typer(name="axon", help="Axon — USDC Bounty Mining CLI", add_completion=False)
 
@@ -41,8 +51,22 @@ def _is_first_run() -> bool:
     return load_wallet() is None
 
 
+def _version_callback(show: bool) -> None:
+    if show:
+        print(f"axon {_cli_version()}")
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
-def main(ctx: typer.Context):
+def main(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False, "--version", "-V",
+        help="Show CLI version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+):
     """Axon CLI. Run 'axon onboard' for first-time setup."""
     print_banner()
     if ctx.invoked_subcommand is None:
@@ -119,8 +143,12 @@ def onboard():
 
     # Step 2: Connect & authenticate with server
     console.print()
-    from axon.config import load_config, DEFAULT_CONFIG
-    save_config({"server_url": DEFAULT_CONFIG["server_url"]})
+    from axon.config import load_config, DEFAULT_CONFIG, get_token
+    # Only seed server_url on first run; don't stomp a user's custom endpoint
+    # (e.g., localhost for dev). Resumable onboard must preserve config.
+    config = load_config()
+    if not config.get("server_url"):
+        save_config({"server_url": DEFAULT_CONFIG["server_url"]})
     server = load_config()["server_url"]
     try:
         with httpx.Client(timeout=5, transport=httpx.HTTPTransport(proxy=None)) as c:
@@ -131,14 +159,20 @@ def onboard():
             console.print(f"  [error]✗ Server returned {resp.status_code}[/]")
     except Exception:
         console.print(f"  [warning]⚠ Cannot reach server[/]")
-    try:
-        from axon.api import _ensure_auth
-        _ensure_auth()
-        console.print("  [success]✓ Authenticated[/]")
-    except Exception:
-        console.print("  [warning]⚠ Could not authenticate (server may be offline)[/]")
+    # Skip re-auth if we already hold a valid-looking token (idempotent resume).
+    if get_token():
+        console.print("  [secondary]✓ Existing auth token found[/]")
+    else:
+        try:
+            from axon.api import _ensure_auth
+            _ensure_auth()
+            console.print("  [success]✓ Authenticated[/]")
+        except Exception:
+            console.print("  [warning]⚠ Could not authenticate (server may be offline)[/]")
 
-    # Step 4: Mining backend
+    # Step 4: Mining backend — if already configured, offer to keep it (resume
+    # semantics: running onboard again after a partial failure shouldn't reset
+    # the user's earlier choices).
     import shutil
     console.print()
     backend_list = [
@@ -146,6 +180,26 @@ def onboard():
         ("claude-cli", "Claude Code CLI (agentic — tools, search, code exec)"),
         ("codex-cli",  "OpenAI Codex CLI (agentic — code exec, search)"),
     ]
+    current_backend = load_config().get("backend", "")
+    if current_backend and current_backend in (b[0] for b in backend_list):
+        console.print(f"  Current backend: [accent]{current_backend}[/]")
+        if not typer.confirm("  Change it?", default=False):
+            chosen_backend = current_backend
+            console.print(f"  [success]✓ Backend: {chosen_backend}[/]")
+            _check_cli_available(chosen_backend, shutil)
+            # Skip API-key / model selection below; they're already configured.
+            if chosen_backend in ("claude-cli", "codex-cli"):
+                console.print(f"\n  [secondary]Using {chosen_backend}[/]")
+            else:
+                console.print()
+                _configure_api_backend()
+            from axon.wallet import get_address
+            console.print(f"\n{branded_title('Setup complete!')}")
+            console.print(f"  Wallet: [address]{get_address()}[/]\n")
+            console.print("  Run [command]axon tasks[/] to see available tasks.")
+            console.print("  Run [command]axon mine[/] to start mining.\n")
+            return
+
     backend_labels = []
     for bid, label in backend_list:
         avail = ""
@@ -627,8 +681,7 @@ def balance():
     if me.get("balance", 0) == 0:
         console.print(
             "  [warning]Your platform balance is $0.[/]  "
-            "[secondary]Transfer USDC on Base to your wallet, then run "
-            "`axon deposit` (coming soon) or mine tasks that pay in $AXN.[/]"
+            "[secondary]Run [command]axon deposit[/secondary] for funding instructions.[/]"
         )
         console.print()
 
@@ -669,6 +722,91 @@ def _fetch_base_balances(address: str) -> dict:
         "usdc": int(usdc_raw, 16) / 1e6,
         "usdt": int(usdt_raw, 16) / 1e6,
     }
+
+
+# --- Deposit ---
+
+@app.command()
+def deposit(tx_hash: Optional[str] = typer.Argument(None, help="On-chain tx hash (0x...) to claim. Omit to see funding instructions.")):
+    """Deposit USDC by submitting an on-chain transaction hash.
+
+    Workflow:
+      1. Run `axon deposit` (no args) to get the platform receiving address.
+      2. Send USDC on Base mainnet to that address from YOUR axon CLI wallet
+         (shown by `axon wallet`). Sending from another wallet (e.g. MetaMask)
+         will not work with this command — use scripts/claim_deposit.py instead.
+      3. Copy the transaction hash.
+      4. Run `axon deposit <tx_hash>` to claim the funds to your platform balance.
+    """
+    from rich.panel import Panel
+    from rich.table import Table
+
+    # No args → show deposit info panel
+    if not tx_hash:
+        info = _api(api_get, "/api/deposit/info", auth=False)
+        if not info.get("enabled"):
+            console.print()
+            console.print("  [warning]Deposits are not currently enabled on this server.[/]")
+            console.print("  [secondary]The operator has not configured a receiving address.[/]")
+            console.print()
+            return
+
+        from axon.wallet import get_address
+        my_addr = get_address() or "(run `axon onboard` first)"
+
+        kv = Table(box=None, show_header=False, padding=(0, 2))
+        kv.add_column("Key", style="secondary")
+        kv.add_column("Value")
+        kv.add_row("Chain", f"[accent]{info['chain']}[/]")
+        kv.add_row("USDC contract", f"[address]{info['usdc_contract']}[/]")
+        kv.add_row("Deposit address", f"[money.bold]{info['deposit_address']}[/]")
+        kv.add_row("Confirmations", f"{info['min_confirmations']} blocks (~{info['min_confirmations'] * 2}s)")
+        kv.add_row("", "")
+        kv.add_row("Your wallet", f"[address]{my_addr}[/]")
+        kv.add_row("", "[secondary](must send USDC from this address)[/]")
+
+        panel = Panel(
+            kv,
+            title=branded_title("Deposit USDC"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+        console.print()
+        console.print(panel)
+        console.print()
+        console.print("  [secondary]Steps:[/]")
+        console.print("    1. Send USDC on Base from [address]" + (my_addr if my_addr.startswith("0x") else "your axon wallet") + "[/]")
+        console.print("       to [money.bold]" + info["deposit_address"] + "[/]")
+        console.print(f"    2. Wait for {info['min_confirmations']} block confirmations")
+        console.print("    3. Run [command]axon deposit <tx_hash>[/] to claim")
+        console.print()
+        return
+
+    # With tx_hash → attempt claim. Basic format check before the network call.
+    if not tx_hash.startswith("0x") or len(tx_hash) != 66:
+        console.print("  [error]Invalid tx_hash — expected 0x-prefixed 64 hex chars.[/]")
+        raise typer.Exit(1)
+
+    try:
+        result = _api(api_post, "/api/deposit", {"tx_hash": tx_hash})
+    except typer.Exit:
+        # _api already printed the error. For a sender-mismatch (HTTP 400), the
+        # detail is verbose; remind the user there's a separate script for
+        # claims from non-axon-CLI wallets.
+        console.print(
+            "  [secondary]Tip: if the USDC was sent from a wallet other than your "
+            "axon CLI wallet, use [command]scripts/claim_deposit.py[/] with that "
+            "wallet's private key.[/]"
+        )
+        raise
+
+    credited = result.get("credited_cents", 0)
+    new_balance = result.get("new_balance_cents", 0)
+    confirmations = result.get("confirmations", "?")
+    console.print()
+    console.print(f"  [success]✓ Deposit confirmed[/]  ({confirmations} confirmations)")
+    console.print(f"    Credited:    [money.bold]{_fmt_usdc(credited)}[/]")
+    console.print(f"    New balance: [money.bold]{_fmt_usdc(new_balance)}[/]")
+    console.print()
 
 
 # --- Network ---
