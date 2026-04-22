@@ -14,7 +14,7 @@ from axon.theme import (
 BRAILLE_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 
 
-def print_banner():
+def print_banner() -> None:
     from rich.text import Text
     lines = Text(justify="center")
     lines.append("\u03a8  A X O N", style="brand")
@@ -47,6 +47,48 @@ def _format_usage_summary(
     token_str = f"{(total_tokens or 0):,}"
     cost_str = f"${total_cost:.4f}" if total_cost else "$0"
     return token_str, cost_str
+
+
+_EVAL_TYPE_HINT: dict[str, str] = {
+    "exact_match": "answer must match expected string",
+    "numeric":     "numeric within tolerance",
+    "contains":    "answer must contain phrases",
+    "regex":       "regex pattern match (0 or 1)",
+    "code_output": "sandbox runs your code, score from SCORE: line",
+    "llm_judge":   "LLM grades against rubric",
+    "webhook":     "publisher runs their own eval",
+}
+
+
+def _eval_type_hint(eval_type: str) -> str:
+    """Human-readable tail for an eval_type. Empty for unknown types so the
+    caller can conditionally skip rendering."""
+    return _EVAL_TYPE_HINT.get(eval_type, "")
+
+
+def _fmt_time_left(iso_str: str) -> str:
+    """Turn an ISO timestamp into 'in 3d 5h' / 'in 45m' / 'expired'.
+    Returns '-' for missing / unparseable input."""
+    if not iso_str:
+        return "-"
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        delta = dt - datetime.now(timezone.utc)
+        secs = int(delta.total_seconds())
+        if secs <= 0:
+            return "[error]expired[/]"
+        if secs < 3600:
+            return f"{secs // 60}m"
+        if secs < 86400:
+            return f"{secs // 3600}h"
+        days = secs // 86400
+        hours = (secs % 86400) // 3600
+        if days < 10 and hours:
+            return f"{days}d {hours}h"
+        return f"{days}d"
+    except (ValueError, TypeError):
+        return "-"
 
 
 def _time_ago(iso_str: str) -> str:
@@ -116,7 +158,7 @@ def _fmt_community(subs: list[dict], my_miner_id: str = "") -> list[str]:
 
 # ── Task List ──────────────────────────────────────────────────────────
 
-def print_task_list(tasks: list[dict]):
+def print_task_list(tasks: list[dict]) -> None:
     """Display task list as a DOUBLE_EDGE table with status dots."""
     if not tasks:
         console.print("  [secondary]No tasks found.[/]")
@@ -132,6 +174,7 @@ def print_task_list(tasks: list[dict]):
     table.add_column("Status", justify="center")
     table.add_column("Pool (USDC)", justify="right")
     table.add_column("Best", justify="right")
+    table.add_column("Expires", justify="right", style="secondary")
     table.add_column("Eval", style="secondary")
     table.add_column("Title")
 
@@ -144,6 +187,7 @@ def print_task_list(tasks: list[dict]):
             status_dot(status),
             f"[money]{pool}[/]",
             best,
+            _fmt_time_left(t.get("expires_at", "")),
             t.get("eval_type", "?"),
             t.get("title", "?"),
         )
@@ -151,12 +195,19 @@ def print_task_list(tasks: list[dict]):
     console.print()
     console.print(table)
     console.print(f"  [success]\u25cf[/] open  [accent]\u25cf[/] completed  [error]\u25cf[/] closed")
+    console.print(
+        "  [secondary]Eval types:  "
+        "exact_match / numeric / contains / regex = text match · "
+        "code_output = sandbox runs code · "
+        "llm_judge = LLM grades · "
+        "webhook = publisher eval[/]"
+    )
     console.print()
 
 
 # ── Task Detail ────────────────────────────────────────────────────────
 
-def print_task_detail(t: dict):
+def print_task_detail(t: dict) -> None:
     """Display a single task's full details in a DOUBLE panel."""
     status = t.get("status", "?")
     direction = t.get("direction", "maximize")
@@ -171,14 +222,25 @@ def print_task_detail(t: dict):
 
     kv.add_row("ID", f"[secondary]{t.get('id', '?')}[/]")
     kv.add_row("Status", status_dot(status) + f" {status}")
-    kv.add_row("Eval", f"{t.get('eval_type', '?')}  [secondary]({arrow})[/]")
-    kv.add_row("Threshold", str(threshold))
+    eval_type = t.get("eval_type", "?")
+    eval_hint = _eval_type_hint(eval_type)
+    eval_value = f"{eval_type}  [secondary]({arrow}"
+    eval_value += f"  ·  {eval_hint})[/]" if eval_hint else ")[/]"
+    kv.add_row("Eval", eval_value)
+    kv.add_row(
+        "Threshold",
+        f"{threshold}  [secondary](beat this AND community best to earn)[/]",
+    )
     kv.add_row("Pool", f"[money]{_fmt_usdc(t.get('pool_balance', 0))}[/]")
     pct = t.get("completion_reward_pct", 50)
     bonus = (t.get("pool_balance", 0) * pct) // 100
-    kv.add_row("Reward", f"[money]{_fmt_usdc(bonus)}[/]  [secondary]({pct}%)[/]")
-    kv.add_row("Best Score", best)
-    kv.add_row("Baseline", baseline)
+    kv.add_row(
+        "Completion Bonus",
+        f"[money]{_fmt_usdc(bonus)}[/]  [secondary]({pct}% of pool, paid to first miner to cross threshold)[/]",
+    )
+    kv.add_row("Community Best", best)
+    kv.add_row("Baseline", f"{baseline}  [secondary](starting score)[/]")
+    kv.add_row("Expires in", _fmt_time_left(t.get("expires_at", "")))
 
     panel = Panel(
         kv,
@@ -220,7 +282,7 @@ def fmt_round(round_num: int, score: float | None, result: str, earned: int) -> 
 def print_mining_summary(rounds_data: list[dict], best_score: float | None,
                          total_earned: int, round_count: int,
                          total_tokens: int | None = 0, total_cost: float | None = 0.0,
-                         billing_mode: str = "metered"):
+                         billing_mode: str = "metered") -> None:
     """Rich Table summary at end of mining."""
     table = Table(
         title=branded_title("Mining Summary"),
@@ -353,7 +415,7 @@ def _progress_bar(progress: float, width: int = 8) -> str:
 
 # ── Network ────────────────────────────────────────────────────────────
 
-def print_network(data: dict):
+def print_network(data: dict) -> None:
     """Display global network overview + per-task competition table."""
     kv = Table(box=None, show_header=False, padding=(0, 2))
     kv.add_column("Key", style="secondary")
@@ -413,7 +475,7 @@ def print_network(data: dict):
 
 # ── Stats ──────────────────────────────────────────────────────────────
 
-def print_stats(user: dict, breakdown: dict, improvements: int):
+def print_stats(user: dict, breakdown: dict, improvements: int) -> None:
     """Mining statistics display with DOUBLE panel."""
     pool_rewards = breakdown.get("pool_reward", 0)
     completion_rewards = breakdown.get("completion_reward", 0)

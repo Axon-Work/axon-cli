@@ -26,8 +26,13 @@ def _cli_version() -> str:
 app = typer.Typer(name="axon", help="Axon — USDC Bounty Mining CLI", add_completion=False)
 
 
-def _api(fn, *args, **kwargs):
-    """Call an API function with unified error handling."""
+def _api(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+    """Call an API function with unified error handling.
+
+    Passes through the wrapped function's return value. Typed loosely since
+    callers already handle dict / list / None variants from the various
+    /api/* endpoints.
+    """
     try:
         return fn(*args, **kwargs)
     except httpx.ConnectError:
@@ -66,7 +71,7 @@ def main(
         callback=_version_callback,
         is_eager=True,
     ),
-):
+) -> None:
     """Axon CLI. Run 'axon onboard' for first-time setup."""
     print_banner()
     if ctx.invoked_subcommand is None:
@@ -106,8 +111,11 @@ def _select(title: str, options: list[str], cursor_index: int = 0) -> int | None
     return menu.show()
 
 
-def _select_param(title: str, options: list[str], values: list, custom_prompt: str, custom_type: type):
-    """Preset selection menu with Custom fallback. Returns value or raises typer.Exit."""
+def _select_param(title: str, options: list[str], values: list, custom_prompt: str, custom_type: type):  # type: ignore[no-untyped-def]
+    """Preset selection menu with Custom fallback. Returns value or raises typer.Exit.
+
+    Return type depends on `custom_type` (int/float/str), so we stay loose here.
+    """
     idx = _select(title, options)
     if idx is None:
         raise typer.Exit()
@@ -118,7 +126,7 @@ def _select_param(title: str, options: list[str], values: list, custom_prompt: s
 
 
 @app.command()
-def onboard():
+def onboard() -> None:
     """First-time setup — generate wallet, configure model."""
     from axon.config import save_config
     from axon.wallet import load_wallet, generate_wallet, save_wallet
@@ -186,7 +194,7 @@ def onboard():
         if not typer.confirm("  Change it?", default=False):
             chosen_backend = current_backend
             console.print(f"  [success]✓ Backend: {chosen_backend}[/]")
-            _check_cli_available(chosen_backend, shutil)
+            _check_cli_available(chosen_backend, shutil, strict=True)
             # Skip API-key / model selection below; they're already configured.
             if chosen_backend in ("claude-cli", "codex-cli"):
                 console.print(f"\n  [secondary]Using {chosen_backend}[/]")
@@ -215,7 +223,7 @@ def onboard():
     chosen_backend = backend_list[idx][0]
     save_config({"backend": chosen_backend})
     console.print(f"  [success]✓ Backend: {chosen_backend}[/]")
-    _check_cli_available(chosen_backend, shutil)
+    _check_cli_available(chosen_backend, shutil, strict=True)
 
     # CLI backends skip API key / model selection
     if chosen_backend in ("claude-cli", "codex-cli"):
@@ -232,7 +240,7 @@ def onboard():
     console.print("  Run [command]axon mine[/] to start mining.\n")
 
 
-def _configure_api_backend():
+def _configure_api_backend() -> None:
     """Interactive provider → API key → model selection for API backend."""
     from axon.config import load_config, save_config
     from axon.providers import fetch_models
@@ -305,7 +313,7 @@ def _configure_api_backend():
         _pick_model(models, "ollama", save_config)
 
 
-def _pick_model(models: list[dict], provider: str, save_config):
+def _pick_model(models: list[dict], provider: str, save_config) -> None:  # type: ignore[no-untyped-def]
     """Arrow-key model picker. Falls back to manual input."""
     if models:
         menu_items = [m["label"] for m in models[:20]] + ["Enter model name manually"]
@@ -331,7 +339,7 @@ def _pick_model(models: list[dict], provider: str, save_config):
 # --- Wallet ---
 
 @app.command()
-def wallet():
+def wallet() -> None:
     """Show wallet address."""
     from axon.wallet import load_wallet
     w = load_wallet()
@@ -345,7 +353,7 @@ def wallet():
 # --- Model ---
 
 @app.command()
-def model(name: str = ""):
+def model(name: str = "") -> None:
     """Show or switch LLM model."""
     from axon.config import load_config, save_config
     from axon.providers import fetch_models
@@ -428,7 +436,7 @@ def model(name: str = ""):
 # --- Backend ---
 
 @app.command()
-def backend(name: str = typer.Argument("", help="Backend name: auto, api, claude-cli, codex-cli")):
+def backend(name: str = typer.Argument("", help="Backend name: auto, api, claude-cli, codex-cli")) -> None:
     """Show or switch mining backend (auto, api, claude-cli, codex-cli)."""
     import shutil
     from axon.backends import auto_detect_backend
@@ -492,18 +500,44 @@ def backend(name: str = typer.Argument("", help="Backend name: auto, api, claude
         _configure_api_backend()
 
 
-def _check_cli_available(backend_name: str, shutil):
-    """Warn if CLI tool is not installed."""
+def _check_cli_available(backend_name: str, shutil, *, strict: bool = False) -> None:  # type: ignore[no-untyped-def]
+    """Check that the backend's CLI tool is installed.
+
+    `strict=True` (used by `axon onboard`) aborts with typer.Exit(1) when
+    the tool is missing, so users don't complete a setup that would fail
+    on the first `axon mine`. `strict=False` prints a warning and returns,
+    letting `axon backend <name>` still flip config even when the tool
+    isn't installed yet (user may install it in a moment).
+    """
+    missing_tool = ""
+    install_hint = ""
     if backend_name == "claude-cli" and not shutil.which("claude"):
-        console.print("  [warning]⚠ 'claude' CLI not found in PATH. Install: npm install -g @anthropic-ai/claude-code[/]")
+        missing_tool = "claude"
+        install_hint = "npm install -g @anthropic-ai/claude-code"
     elif backend_name == "codex-cli" and not shutil.which("codex"):
-        console.print("  [warning]⚠ 'codex' CLI not found in PATH. Install: npm install -g @openai/codex[/]")
+        missing_tool = "codex"
+        install_hint = "npm install -g @openai/codex"
+    if not missing_tool:
+        return
+
+    if strict:
+        console.print(f"  [error]✗ '{missing_tool}' CLI is not installed.[/]")
+        console.print(f"  [secondary]Install it first:  [command]{install_hint}[/command][/]")
+        console.print(
+            "  [secondary]Then rerun [command]axon onboard[/], "
+            "or pick the [brand]litellm[/] API backend instead.[/]"
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        f"  [warning]⚠ '{missing_tool}' CLI not found in PATH. Install: {install_hint}[/]"
+    )
 
 
 # --- Tasks ---
 
 @app.command()
-def tasks(status_filter: str = "open"):
+def tasks(status_filter: str = "open") -> None:
     """List available tasks."""
     from axon.display import print_task_list
     data = _api(api_get, f"/api/tasks?status_filter={status_filter}", auth=False)
@@ -511,7 +545,7 @@ def tasks(status_filter: str = "open"):
 
 
 @app.command()
-def task(task_id: str):
+def task(task_id: str) -> None:
     """View details of a specific task by ID (or row number from 'axon tasks')."""
     from axon.display import print_task_detail
 
@@ -554,7 +588,7 @@ def mine(
         min=0,
         help="Spending limit in USD for metered backends. 0 = no limit.",
     ),
-):
+) -> None:
     """Start mining a task. Runs continuously by default — stop with Ctrl+C."""
     from axon.config import load_config
     from axon.backends import auto_detect_backend
@@ -645,7 +679,7 @@ def mine(
 # --- Balance ---
 
 @app.command()
-def balance():
+def balance() -> None:
     """Show USDC balance + on-chain assets (Base)."""
     from rich.panel import Panel
     from rich.table import Table
@@ -676,17 +710,29 @@ def balance():
     console.print(panel)
     console.print()
 
-    # Actionable hint when the platform balance is empty — otherwise the user
-    # sees just "$0.00" and has no idea how to proceed.
+    # Actionable panel when the platform balance is empty. Users often assume
+    # "zero balance = can't mine", which is wrong — only GPU tasks charge an
+    # eval_fee. The panel separates those two cases so a free-tier CPU miner
+    # doesn't bounce thinking they need to buy USDC first.
     if me.get("balance", 0) == 0:
+        hint = (
+            "[brand]Start mining now:[/]\n"
+            "  • CPU tasks are [success]FREE[/]  (exact_match / llm_judge / code_output CPU)\n"
+            "  • GPU tasks charge [money]1¢ – 10¢[/] per submit\n\n"
+            "  Run [command]axon mine[/]       pick a task and go\n"
+            "  Run [command]axon deposit[/]    add USDC (only needed for GPU)"
+        )
         console.print(
-            "  [warning]Your platform balance is $0.[/]  "
-            "[secondary]Run [command]axon deposit[/secondary] for funding instructions.[/]"
+            Panel(
+                hint,
+                title=branded_title("Zero balance — what next"),
+                box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+            )
         )
         console.print()
 
 
-def _fetch_base_balances(address: str) -> dict:
+def _fetch_base_balances(address: str) -> dict[str, float]:
     """Fetch ETH, USDC, USDT balances on Base mainnet via public RPC."""
     import httpx
 
@@ -701,11 +747,11 @@ def _fetch_base_balances(address: str) -> dict:
     padded_addr = "0" * 24 + address[2:].lower()
     calldata = "0x70a08231" + padded_addr
 
-    def rpc_call(method, params):
+    def rpc_call(method: str, params: list) -> str:
         for rpc in rpcs:
             try:
-                resp = httpx.post(rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                                  timeout=10, transport=httpx.HTTPTransport(proxy=None))
+                with httpx.Client(timeout=10, transport=httpx.HTTPTransport(proxy=None)) as c:
+                    resp = c.post(rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
                 result = resp.json().get("result")
                 if result:
                     return result
@@ -727,7 +773,7 @@ def _fetch_base_balances(address: str) -> dict:
 # --- Deposit ---
 
 @app.command()
-def deposit(tx_hash: Optional[str] = typer.Argument(None, help="On-chain tx hash (0x...) to claim. Omit to see funding instructions.")):
+def deposit(tx_hash: Optional[str] = typer.Argument(None, help="On-chain tx hash (0x...) to claim. Omit to see funding instructions.")) -> None:
     """Deposit USDC by submitting an on-chain transaction hash.
 
     Workflow:
@@ -812,7 +858,7 @@ def deposit(tx_hash: Optional[str] = typer.Argument(None, help="On-chain tx hash
 # --- Network ---
 
 @app.command()
-def network():
+def network() -> None:
     """Show global network overview — active miners, pools, per-task competition."""
     from axon.display import print_network
     data = _api(api_get, "/api/network", auth=False)
@@ -822,7 +868,7 @@ def network():
 # --- Stats ---
 
 @app.command()
-def stats():
+def stats() -> None:
     """Show mining statistics."""
     from axon.display import print_stats
 
@@ -849,7 +895,7 @@ def stats():
 # --- Publish ---
 
 @app.command()
-def publish(file: Optional[str] = typer.Argument(None, help="JSON task config file")):
+def publish(file: Optional[str] = typer.Argument(None, help="JSON task config file")) -> None:
     """Publish a new task funded from your balance."""
     from rich.panel import Panel
     from rich.table import Table
@@ -884,7 +930,16 @@ def publish(file: Optional[str] = typer.Argument(None, help="JSON task config fi
     # Preview
     _print_publish_preview(data)
 
-    if not typer.confirm("\n  Publish this task?", default=True):
+    # Immutability notice — publishers cannot edit or early-close a task
+    # once published. The only exits are natural expiry (auto-refund of
+    # remaining pool) or admin takedown.
+    console.print(
+        "\n  [warning]⚠  Once published, the task is IMMUTABLE.[/]\n"
+        "  [secondary]You cannot edit the title, description, eval config, threshold,\n"
+        "  pool balance, or expiry. Only natural expiry or an admin takedown can\n"
+        "  end it early; both refund any unclaimed pool to your balance.[/]"
+    )
+    if not typer.confirm("\n  Publish this task?", default=False):
         console.print("  [secondary]Cancelled.[/]")
         raise typer.Exit()
 
@@ -908,7 +963,10 @@ def _publish_from_file(path: str) -> dict:
         console.print(f"[error]Invalid JSON: {e}[/]")
         raise typer.Exit(1)
 
-    required = ["title", "description", "eval_type", "eval_config", "completion_threshold", "pool_balance"]
+    required = [
+        "title", "description", "eval_type", "eval_config",
+        "completion_threshold", "pool_balance", "expires_at",
+    ]
     missing = [f for f in required if f not in data]
     if missing:
         console.print(f"[error]Missing required fields: {', '.join(missing)}[/]")
@@ -972,6 +1030,21 @@ def _publish_wizard(balance: int) -> dict:
         "Completion reward % (0-100)", int,
     )
 
+    # Step 9: Duration → expires_at
+    # Task is immutable after publish; duration sets the auto-close window.
+    console.print()
+    duration_hours = _select_param(
+        "  Duration (auto-close window):\n",
+        ["1 hour", "1 day", "7 days", "30 days (default)", "90 days", "Custom..."],
+        [1, 24, 24 * 7, 24 * 30, 24 * 90, None],
+        "Duration in hours (1-8760)", int,
+    )
+    if duration_hours < 1 or duration_hours > 8760:
+        console.print("[error]Duration must be 1-8760 hours (1h - 1 year).[/]")
+        raise typer.Exit(1)
+    from datetime import datetime, timedelta, timezone
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+
     return {
         "title": title,
         "description": description,
@@ -981,6 +1054,7 @@ def _publish_wizard(balance: int) -> dict:
         "completion_threshold": completion_threshold,
         "pool_balance": pool_balance,
         "completion_reward_pct": completion_reward_pct,
+        "expires_at": expires_at.isoformat(),
     }
 
 
@@ -1108,7 +1182,7 @@ def _select_pool(balance: int) -> int:
     return pool
 
 
-def _print_publish_preview(data: dict):
+def _print_publish_preview(data: dict) -> None:
     """Rich panel preview of task to be published."""
     from rich.panel import Panel
     from rich.table import Table
@@ -1125,6 +1199,20 @@ def _print_publish_preview(data: dict):
     pct = data.get("completion_reward_pct", 50)
     bonus = (data["pool_balance"] * pct) // 100
     kv.add_row("Completion Reward", f"[money]{_fmt_usdc(bonus)}[/]  [secondary]({pct}%)[/]")
+    expires_at_str = data.get("expires_at", "")
+    if expires_at_str:
+        from datetime import datetime, timezone
+        try:
+            exp = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+            delta = exp - datetime.now(timezone.utc)
+            hours = int(delta.total_seconds() / 3600)
+            if hours >= 24:
+                when = f"{hours // 24}d {hours % 24}h"
+            else:
+                when = f"{hours}h"
+            kv.add_row("Expires in", f"{when}  [secondary]({exp.isoformat(timespec='minutes')})[/]")
+        except ValueError:
+            kv.add_row("Expires at", expires_at_str)
 
     desc_preview = data["description"][:120]
     if len(data["description"]) > 120:

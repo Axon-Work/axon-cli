@@ -19,7 +19,7 @@ def _now_iso() -> str:
 class LiteLLMBackend:
     name = "litellm"
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict) -> None:
         self._model = config.get("default_model", "anthropic/claude-sonnet-4-20250514")
         self._api_base = config.get("api_base", "")
 

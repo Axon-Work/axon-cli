@@ -1,6 +1,6 @@
 [project]
 name = "axonwork"
-version = "0.2.9"
+version = "0.3.0"
 description = "Axon mining CLI for the Proof of Useful Work platform"
 requires-python = ">=3.11"
 dependencies = [

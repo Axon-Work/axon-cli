@@ -79,6 +79,64 @@ def test_balance():
     assert "0xAbCd" in result.output
 
 
+def test_balance_zero_shows_free_cpu_hint():
+    """Balance=$0 users see a panel telling them CPU tasks are FREE — fixes
+    the common misconception that empty platform balance blocks all mining."""
+    fake_me = {"address": "0xAbCdEf1234567890AbCdEf1234567890AbCdEf12", "balance": 0}
+    with patch("axon.cli.api_get", return_value=fake_me):
+        result = runner.invoke(app, ["balance"])
+    assert result.exit_code == 0
+    assert "FREE" in result.output or "free" in result.output
+    assert "axon mine" in result.output
+    assert "axon deposit" in result.output
+
+
+def test_balance_nonzero_hides_zero_hint():
+    """Positive balance → no 'zero balance' panel clutter."""
+    fake_me = {"address": "0xAbCdEf", "balance": 100}
+    with patch("axon.cli.api_get", return_value=fake_me):
+        result = runner.invoke(app, ["balance"])
+    assert result.exit_code == 0
+    assert "Zero balance" not in result.output
+
+
+# ---------- _check_cli_available strict mode (E1) ----------
+
+def test_check_cli_strict_aborts_when_missing(monkeypatch):
+    """onboard passes strict=True. When the chosen CLI backend isn't on
+    PATH, we must abort with Exit(1) so the user doesn't complete a setup
+    that fails on first mine."""
+    import shutil as _shutil
+    import typer
+    import pytest as _pytest
+    from axon.cli import _check_cli_available
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    with _pytest.raises(typer.Exit) as exc_info:
+        _check_cli_available("claude-cli", _shutil, strict=True)
+    assert exc_info.value.exit_code == 1
+
+
+def test_check_cli_strict_passes_when_installed(monkeypatch):
+    """Strict mode is a no-op when the tool is on PATH."""
+    import shutil as _shutil
+    from axon.cli import _check_cli_available
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/local/bin/" + name)
+    _check_cli_available("claude-cli", _shutil, strict=True)
+    _check_cli_available("codex-cli", _shutil, strict=True)
+    _check_cli_available("litellm", _shutil, strict=True)  # no CLI tool to check
+
+
+def test_check_cli_nonstrict_warns_only(monkeypatch):
+    """Non-strict (default) must NOT abort — prints a warning and returns,
+    so `axon backend claude-cli` can still flip config while tool is being
+    installed."""
+    import shutil as _shutil
+    from axon.cli import _check_cli_available
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    _check_cli_available("claude-cli", _shutil)   # no raise
+    _check_cli_available("codex-cli", _shutil)
+
+
 # ---------- axon mine ----------
 
 def test_mine_no_tasks():
@@ -88,139 +146,70 @@ def test_mine_no_tasks():
     assert "No open tasks" in result.output
 
 
+# The mine command opens an interactive simple_term_menu when --rounds /
+# --timeout / --budget are not supplied. CliRunner has no tty, so tests
+# must pass all three flags explicitly to avoid the menu (which would
+# raise OSError: Device not configured at termios setup).
+_FAKE_TASK = {
+    "id": "aaaa-bbbb",
+    "title": "Best task",
+    "pool_balance": 500,
+    "best_score": None,
+    "eval_type": "exact_match",
+    "direction": "maximize",
+    "completion_threshold": 1.0,
+    "description": "test",
+    "eval_config": {},
+    "status": "open",
+}
+
+
 def test_mine_single_task():
     """mine starts immediately when there is a single open task."""
-    fake_task = {
-        "id": "aaaa-bbbb",
-        "title": "Best task",
-        "pool_balance": 500,
-        "best_score": None,
-        "eval_type": "exact_match",
-        "direction": "maximize",
-        "completion_threshold": 1.0,
-        "description": "test",
-        "eval_config": {},
-        "status": "open",
-    }
-
     with (
-        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.cli.api_get", return_value=[_FAKE_TASK]),
         patch("axon.mining.run_mining") as mock_run_mining,
         patch("os.system", return_value=0),
     ):
-        result = runner.invoke(app, ["mine"])
-    assert result.exit_code == 0
-    mock_run_mining.assert_called_once_with(fake_task, 5, cli_timeout_override=600)
+        result = runner.invoke(app, ["mine", "--rounds", "5", "--timeout", "600", "--budget", "0"])
+    assert result.exit_code == 0, result.output
+    mock_run_mining.assert_called_once_with(_FAKE_TASK, 5, cli_timeout_override=600, budget=0.0)
 
 
-def test_mine_yolo_single_task():
-    """mine --yolo disables hard timeout and round limit for this run."""
-    fake_task = {
-        "id": "aaaa-bbbb",
-        "title": "Best task",
-        "pool_balance": 500,
-        "best_score": None,
-        "eval_type": "exact_match",
-        "direction": "maximize",
-        "completion_threshold": 1.0,
-        "description": "test",
-        "eval_config": {},
-        "status": "open",
-    }
-
+def test_mine_unlimited():
+    """--rounds 0 means unlimited; --timeout 0 means no hard cap."""
     with (
-        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.cli.api_get", return_value=[_FAKE_TASK]),
         patch("axon.mining.run_mining") as mock_run_mining,
+        patch("os.system", return_value=0),
     ):
-        result = runner.invoke(app, ["mine", "--yolo"])
-    assert result.exit_code == 0
-    mock_run_mining.assert_called_once_with(fake_task, 0, cli_timeout_override=None)
+        result = runner.invoke(app, ["mine", "--rounds", "0", "--timeout", "0", "--budget", "0"])
+    assert result.exit_code == 0, result.output
+    mock_run_mining.assert_called_once_with(_FAKE_TASK, 0, cli_timeout_override=None, budget=0.0)
 
 
-def test_mine_yolo_single_dash_alias():
-    """mine -yolo is accepted as an alias for --yolo."""
-    fake_task = {
-        "id": "aaaa-bbbb",
-        "title": "Best task",
-        "pool_balance": 500,
-        "best_score": None,
-        "eval_type": "exact_match",
-        "direction": "maximize",
-        "completion_threshold": 1.0,
-        "description": "test",
-        "eval_config": {},
-        "status": "open",
-    }
-
+def test_mine_custom_rounds():
+    """--rounds N passes through to run_mining."""
     with (
-        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.cli.api_get", return_value=[_FAKE_TASK]),
         patch("axon.mining.run_mining") as mock_run_mining,
+        patch("os.system", return_value=0),
     ):
-        result = runner.invoke(app, ["mine", "-yolo"])
-    assert result.exit_code == 0
-    mock_run_mining.assert_called_once_with(fake_task, 0, cli_timeout_override=None)
-
-
-def test_mine_yolo_conflicts_with_max_rounds():
-    with patch("axon.cli.api_get", return_value=[]):
-        result = runner.invoke(app, ["mine", "--yolo", "--max-rounds", "10"])
-    assert result.exit_code == 1
-    assert "Cannot combine --yolo with --max-rounds" in result.output
-
-
-def test_mine_yolo_conflicts_with_timeout():
-    with patch("axon.cli.api_get", return_value=[]):
-        result = runner.invoke(app, ["mine", "--yolo", "--timeout", "180"])
-    assert result.exit_code == 1
-    assert "Cannot combine --yolo with --timeout" in result.output
-
-
-def test_mine_custom_max_rounds():
-    """mine --max-rounds overrides the default round cap but keeps the default timeout."""
-    fake_task = {
-        "id": "aaaa-bbbb",
-        "title": "Best task",
-        "pool_balance": 500,
-        "best_score": None,
-        "eval_type": "exact_match",
-        "direction": "maximize",
-        "completion_threshold": 1.0,
-        "description": "test",
-        "eval_config": {},
-        "status": "open",
-    }
-
-    with (
-        patch("axon.cli.api_get", return_value=[fake_task]),
-        patch("axon.mining.run_mining") as mock_run_mining,
-    ):
-        result = runner.invoke(app, ["mine", "--max-rounds", "10"])
-    assert result.exit_code == 0
-    mock_run_mining.assert_called_once_with(fake_task, 10, cli_timeout_override=600)
+        result = runner.invoke(app, ["mine", "--rounds", "10", "--timeout", "600", "--budget", "0"])
+    assert result.exit_code == 0, result.output
+    mock_run_mining.assert_called_once_with(_FAKE_TASK, 10, cli_timeout_override=600, budget=0.0)
 
 
 def test_mine_custom_timeout():
-    """mine --timeout overrides the default hard timeout but keeps the default round cap."""
-    fake_task = {
-        "id": "aaaa-bbbb",
-        "title": "Best task",
-        "pool_balance": 500,
-        "best_score": None,
-        "eval_type": "exact_match",
-        "direction": "maximize",
-        "completion_threshold": 1.0,
-        "description": "test",
-        "eval_config": {},
-        "status": "open",
-    }
-
+    """--timeout N passes through as cli_timeout_override."""
     with (
-        patch("axon.cli.api_get", return_value=[fake_task]),
+        patch("axon.cli.api_get", return_value=[_FAKE_TASK]),
         patch("axon.mining.run_mining") as mock_run_mining,
+        patch("os.system", return_value=0),
     ):
-        result = runner.invoke(app, ["mine", "--timeout", "180"])
-    assert result.exit_code == 0
-    mock_run_mining.assert_called_once_with(fake_task, 5, cli_timeout_override=180)
+        result = runner.invoke(app, ["mine", "--rounds", "5", "--timeout", "180", "--budget", "0"])
+    assert result.exit_code == 0, result.output
+    mock_run_mining.assert_called_once_with(_FAKE_TASK, 5, cli_timeout_override=180, budget=0.0)
 
 
 # ---------- axon tasks list ----------

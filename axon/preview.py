@@ -7,7 +7,7 @@ from axon.display import (
 )
 
 
-def main():
+def main() -> None:
     console.print("\n[brand]── CRT Theme Preview ──[/]\n")
 
     # Banner

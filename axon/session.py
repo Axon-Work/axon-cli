@@ -17,10 +17,10 @@ def load_session(task_id: str) -> dict | None:
         return None
 
 
-def save_session(task_id: str, data: dict):
+def save_session(task_id: str, data: dict) -> None:
     atomic_write_json(SESSIONS_DIR / f"{task_id}.json", data)
 
 
-def delete_session(task_id: str):
+def delete_session(task_id: str) -> None:
     path = SESSIONS_DIR / f"{task_id}.json"
     path.unlink(missing_ok=True)

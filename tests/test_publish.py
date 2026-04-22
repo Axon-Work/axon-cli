@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -32,6 +33,7 @@ def test_publish_from_json_file():
         "eval_config": {"setup_code": "print(solve())", "timeout": 30},
         "completion_threshold": 0.5,
         "pool_balance": 5000,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(task_data, f)
@@ -112,6 +114,7 @@ def test_publish_pool_exceeds_balance():
         "eval_config": {"expected": "42"},
         "completion_threshold": 1.0,
         "pool_balance": 5000,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(task_data, f)
@@ -138,6 +141,7 @@ def test_publish_user_cancels():
         "eval_config": {"expected": "42"},
         "completion_threshold": 1.0,
         "pool_balance": 5000,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(task_data, f)

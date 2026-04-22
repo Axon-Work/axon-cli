@@ -1,9 +1,13 @@
 """Backend HTTP client with automatic wallet auth."""
+from __future__ import annotations
+
+from typing import Any
+
 import httpx
 from axon.config import load_config, get_token, save_config
 
 
-def _ensure_auth():
+def _ensure_auth() -> None:
     """Auto-authenticate with wallet if no valid token."""
     transport = httpx.HTTPTransport(proxy=None)
 
@@ -62,21 +66,21 @@ def _client(auth: bool = True, timeout: int = 120) -> httpx.Client:
     )
 
 
-def api_get(path: str, auth: bool = True) -> dict | list:
+def api_get(path: str, auth: bool = True) -> Any:
     with _client(auth=auth) as c:
         resp = c.get(path)
         resp.raise_for_status()
         return resp.json()
 
 
-def api_post(path: str, body: dict, auth: bool = True) -> dict:
+def api_post(path: str, body: dict, auth: bool = True) -> Any:
     with _client(auth=auth) as c:
         resp = c.post(path, json=body)
         resp.raise_for_status()
         return resp.json()
 
 
-def api_patch(path: str, body: dict | None = None, auth: bool = True) -> dict:
+def api_patch(path: str, body: dict | None = None, auth: bool = True) -> Any:
     with _client(auth=auth) as c:
         resp = c.patch(path, json=body) if body else c.patch(path)
         resp.raise_for_status()
