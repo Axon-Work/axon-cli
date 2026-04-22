@@ -1,17 +1,19 @@
 """Backend registry and factory function."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, TypeVar
 
 if TYPE_CHECKING:
     from axon.backends.base import Backend
 
 _REGISTRY: dict[str, type] = {}
 
+_T = TypeVar("_T", bound=type)
 
-def register(name: str):
+
+def register(name: str) -> Callable[[_T], _T]:
     """Decorator to register a backend class by name."""
-    def wrapper(cls):
+    def wrapper(cls: _T) -> _T:
         _REGISTRY[name] = cls
         return cls
     return wrapper
@@ -50,7 +52,7 @@ def create_backend(backend_name: str, config: dict) -> Backend:
 _loaded = False
 
 
-def _ensure_loaded():
+def _ensure_loaded() -> None:
     global _loaded
     if _loaded:
         return

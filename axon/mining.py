@@ -1,9 +1,12 @@
 """Mining loop — KeyWatcher, MiningDisplay, and run_mining (multi-task model)."""
+from __future__ import annotations
+
 import sys
 import time
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 from rich.live import Live
@@ -56,9 +59,10 @@ def _usage_billing_mode(usage: dict, backend_name: str) -> str:
 class KeyWatcher:
     """Background thread watching for ctrl+o / arrow keypresses."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        import threading
         self._show = False
-        self._stop_event = None
+        self._stop_event: threading.Event | None = None
         self.detail_idx: int = -1   # -1 = latest
         self.detail_count: int = 0  # set by mining loop
 
@@ -66,7 +70,7 @@ class KeyWatcher:
     def show_details(self) -> bool:
         return self._show
 
-    def start(self):
+    def start(self) -> None:
         try:
             if not sys.stdin.isatty():
                 return
@@ -77,7 +81,7 @@ class KeyWatcher:
         t = threading.Thread(target=self._run, daemon=True)
         t.start()
 
-    def _run(self):
+    def _run(self) -> None:
         import os, termios, select
         fd = sys.stdin.fileno()
         try:
@@ -115,7 +119,7 @@ class KeyWatcher:
             except (OSError, termios.error):
                 pass
 
-    def stop(self):
+    def stop(self) -> None:
         if self._stop_event:
             self._stop_event.set()
 
@@ -123,7 +127,7 @@ class KeyWatcher:
 class MiningDisplay:
     """Dynamic renderable for Rich Live — compact status panel at bottom."""
 
-    def __init__(self, watcher: KeyWatcher):
+    def __init__(self, watcher: KeyWatcher) -> None:
         self._watcher = watcher
         self.task_title: str = ""
         self.model: str = ""
@@ -146,7 +150,7 @@ class MiningDisplay:
         self.completion_reward_pct: int = 50
         self.call_started_at: float | None = None
 
-    def __rich_console__(self, rconsole, options):
+    def __rich_console__(self, rconsole: Any, options: Any) -> Any:
         # Append elapsed time to status if LLM call is in progress
         status = self.status
         if self.call_started_at is not None:
@@ -175,12 +179,12 @@ class MiningDisplay:
             completion_reward_pct=self.completion_reward_pct,
         )
 
-    def __rich_measure__(self, rconsole, options):
+    def __rich_measure__(self, rconsole: Any, options: Any) -> Any:
         from rich.measure import Measurement
         return Measurement(40, options.max_width)
 
 
-def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None | object = _UNSET, budget: float = 0):
+def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None | object = _UNSET, budget: float = 0) -> None:
     """Mining loop: rounds scroll above, status panel stays at bottom."""
     config = load_config()
     backend_config = dict(config)
@@ -241,7 +245,12 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
     state.billing_mode = "subscription" if backend.name in ("codex-cli", "claude-cli") else "metered"
     state.max_rounds = max_rounds
     state.budget = budget
-    state.timeout = 0 if cli_timeout_override is None else (cli_timeout_override if cli_timeout_override is not _UNSET else 0)
+    if cli_timeout_override is None:
+        state.timeout = 0
+    elif cli_timeout_override is _UNSET or not isinstance(cli_timeout_override, int):
+        state.timeout = 0
+    else:
+        state.timeout = cli_timeout_override
 
     # Get my miner ID for community leaderboard highlighting
     try:
@@ -252,7 +261,7 @@ def run_mining(task: dict, max_rounds: int, *, cli_timeout_override: int | None 
         state.my_miner_id = ""
 
     # Load local history + merge server submissions (dedup)
-    server_subs = []
+    server_subs: list[dict] = []
     try:
         server_subs = api_get(f"/api/tasks/{task_id}/submissions/mine")
     except httpx.HTTPError:

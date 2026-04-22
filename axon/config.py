@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from axon._fs import atomic_write_json
 
@@ -8,7 +11,7 @@ AXON_HOME = Path(os.environ.get("AXON_HOME", str(Path.home() / ".axon")))
 CONFIG_DIR = AXON_HOME
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-DEFAULT_CONFIG = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "server_url": "https://server-production-e814.up.railway.app",
     "auth_token": "",
     "default_model": "anthropic/claude-sonnet-4-20250514",
@@ -43,7 +46,7 @@ def load_config() -> dict:
         return {**DEFAULT_CONFIG}
 
 
-def save_config(updates: dict):
+def save_config(updates: dict) -> None:
     current = load_config()
     if "api_keys" in updates:
         current["api_keys"] = {**current.get("api_keys", {}), **updates.pop("api_keys")}

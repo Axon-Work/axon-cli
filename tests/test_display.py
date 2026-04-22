@@ -48,6 +48,41 @@ def test_print_task_list_empty():
     assert "No tasks found" in out
 
 
+def test_print_task_list_shows_eval_type_glossary():
+    """E3: listing includes a one-line glossary explaining the eval types,
+    so first-time users can pick a task type that matches their setup."""
+    tasks = [
+        {"id": "aaaa1111-2222-3333-4444-555566667777", "title": "X",
+         "eval_type": "llm_judge", "best_score": 0.5, "pool_balance": 1000,
+         "status": "open"},
+    ]
+    out = _capture(display.print_task_list, tasks)
+    assert "code_output" in out and "sandbox" in out
+    assert "llm_judge" in out and "grades" in out
+
+
+def test_print_task_detail_explains_threshold_and_best():
+    """E3: detail view annotates Threshold / Community Best / Baseline with
+    the meaning a first-time miner needs."""
+    task = {
+        "id": "aaaa1111-2222-3333-4444-555566667777",
+        "title": "A", "description": "d",
+        "status": "open", "direction": "maximize",
+        "eval_type": "code_output",
+        "completion_threshold": 0.85,
+        "pool_balance": 10000,
+        "completion_reward_pct": 50,
+        "best_score": 0.7, "baseline_score": 0.3,
+        "expires_at": "2099-01-01T00:00:00+00:00",
+    }
+    out = _capture(display.print_task_detail, task)
+    assert "beat this" in out.lower()
+    assert "Community Best" in out
+    assert "starting score" in out
+    assert "% of pool" in out
+    assert "sandbox" in out
+
+
 # --- _fmt_usdc ---
 
 def test_fmt_usdc_zero():
@@ -124,7 +159,7 @@ def test_print_mining_summary_subscription_usage():
         total_cost=None,
         billing_mode="subscription",
     )
-    assert "Tokens:  unknown" in out
+    assert "Tokens: unknown" in out
     assert "Cost: subscription" in out
 
 

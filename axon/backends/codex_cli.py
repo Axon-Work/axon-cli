@@ -31,7 +31,7 @@ Output ONLY the JSON object, nothing else.
 class CodexCLIBackend:
     name = "codex-cli"
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict) -> None:
         self._timeout = resolve_cli_timeout(config)
         self._model = config.get("codex_cli_model", "")
 

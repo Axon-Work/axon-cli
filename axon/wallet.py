@@ -16,7 +16,7 @@ def generate_wallet() -> dict:
     return {"address": acct.address, "private_key": acct.key.hex()}
 
 
-def save_wallet(wallet: dict):
+def save_wallet(wallet: dict) -> None:
     """Save wallet atomically with 0o600 permissions (owner-only read/write)."""
     atomic_write_json(WALLET_FILE, wallet, mode=0o600)
 

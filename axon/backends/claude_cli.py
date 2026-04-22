@@ -47,7 +47,7 @@ _DEFAULT_SYSTEM = (
 class ClaudeCLIBackend:
     name = "claude-cli"
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict) -> None:
         self._timeout = resolve_cli_timeout(config)
         self._model = config.get("claude_cli_model", "")
 
@@ -127,7 +127,7 @@ def _parse_response(stdout: str) -> BackendResult:
     return _extract_answer(content, usage)
 
 
-def _extract_answer(content, usage: dict) -> BackendResult:
+def _extract_answer(content: object, usage: dict) -> BackendResult:
     """Parse the result field into thinking + answer."""
     if isinstance(content, dict):
         return BackendResult(

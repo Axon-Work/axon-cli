@@ -1,7 +1,9 @@
 """LLM integration — call Anthropic/OpenAI/Ollama via litellm."""
+from __future__ import annotations
+
 import re
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from axon.config import load_config
 
@@ -48,13 +50,13 @@ _AGENT_LLM_JUDGE_GUIDANCE = (
 
 
 def _build_prompt_base(
-    task: dict,
-    my_best_answer,
-    my_best_score,
-    platform_best_score,
-    last_feedback=None,
-    community_subs=None,
-    my_past_subs=None,
+    task: dict[str, Any],
+    my_best_answer: str | None,
+    my_best_score: float | None,
+    platform_best_score: float | None,
+    last_feedback: dict[str, Any] | None = None,
+    community_subs: list[dict[str, Any]] | None = None,
+    my_past_subs: list[dict[str, Any]] | None = None,
     *,
     format: Literal["api", "agent"],
 ) -> str:
@@ -142,8 +144,15 @@ def _build_prompt_base(
     return prompt
 
 
-def build_prompt(task, my_best_answer, my_best_score, platform_best_score,
-                 last_feedback=None, community_subs=None, my_past_subs=None):
+def build_prompt(
+    task: dict[str, Any],
+    my_best_answer: str | None,
+    my_best_score: float | None,
+    platform_best_score: float | None,
+    last_feedback: dict[str, Any] | None = None,
+    community_subs: list[dict[str, Any]] | None = None,
+    my_past_subs: list[dict[str, Any]] | None = None,
+) -> str:
     """Build prompt for the litellm API backend. Closes with XML output format."""
     return _build_prompt_base(
         task, my_best_answer, my_best_score, platform_best_score,
@@ -152,8 +161,15 @@ def build_prompt(task, my_best_answer, my_best_score, platform_best_score,
     )
 
 
-def build_agent_prompt(task, my_best_answer, my_best_score, platform_best_score,
-                       last_feedback=None, community_subs=None, my_past_subs=None):
+def build_agent_prompt(
+    task: dict[str, Any],
+    my_best_answer: str | None,
+    my_best_score: float | None,
+    platform_best_score: float | None,
+    last_feedback: dict[str, Any] | None = None,
+    community_subs: list[dict[str, Any]] | None = None,
+    my_past_subs: list[dict[str, Any]] | None = None,
+) -> str:
     """Build prompt for CLI agent backends (claude-cli, codex-cli).
 
     Unlike build_prompt(), this omits XML output format instructions (CLI
@@ -166,7 +182,7 @@ def build_agent_prompt(task, my_best_answer, my_best_score, platform_best_score,
     )
 
 
-def _parse_response(text):
+def _parse_response(text: str) -> tuple[str, str]:
     think_match = re.search(r"<thinking>(.*?)</thinking>", text, re.DOTALL)
     answer_match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
     thinking = think_match.group(1).strip() if think_match else text
@@ -177,7 +193,7 @@ def _parse_response(text):
     return thinking, answer.strip()
 
 
-def call_llm(prompt, model, api_base=""):
+def call_llm(prompt: str, model: str, api_base: str = "") -> tuple[str, str, dict[str, Any]]:
     """Call LLM via litellm. Returns (thinking, answer, usage)."""
     # Set API keys from config
     config = load_config()
@@ -197,14 +213,14 @@ def call_llm(prompt, model, api_base=""):
     litellm.suppress_debug_info = True
     from litellm import completion, completion_cost
 
-    kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096}
+    kwargs: dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096}
     if api_base:
         kwargs["api_base"] = api_base
 
     response = completion(**kwargs)
     text = response.choices[0].message.content
 
-    usage = {}
+    usage: dict[str, Any] = {}
     if hasattr(response, "usage") and response.usage:
         usage["prompt_tokens"] = getattr(response.usage, "prompt_tokens", 0) or 0
         usage["completion_tokens"] = getattr(response.usage, "completion_tokens", 0) or 0

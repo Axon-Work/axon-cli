@@ -28,7 +28,7 @@ def load_history(task_id: str) -> list[dict]:
     return records
 
 
-def append_record(task_id: str, record: dict):
+def append_record(task_id: str, record: dict) -> None:
     """Append a single JSON record to the task's history file."""
     atomic_append_jsonl(HISTORY_DIR / f"{task_id}.jsonl", record)
 
@@ -125,7 +125,7 @@ def build_error_record(task_id: str, answer: str | None, thinking: str | None,
     }
 
 
-def delete_history(task_id: str):
+def delete_history(task_id: str) -> None:
     """Delete a task's history file."""
     path = HISTORY_DIR / f"{task_id}.jsonl"
     path.unlink(missing_ok=True)
