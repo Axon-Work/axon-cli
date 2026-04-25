@@ -1,0 +1,62 @@
+name: Auto-create release on tag push
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find previous tag's release publish time
+        id: prev
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then
+            T_PREV=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$PREV" --jq .published_at)
+          else
+            T_PREV="2020-01-01T00:00:00Z"
+          fi
+          echo "t_prev=$T_PREV" >> "$GITHUB_OUTPUT"
+
+      - name: Clone axon-dev (private, read-only)
+        env:
+          AXON_DEV_PAT: ${{ secrets.AXON_DEV_READ_PAT }}
+        run: |
+          git clone "https://x-access-token:${AXON_DEV_PAT}@github.com/Axon-Work/axon-dev.git" /tmp/axon-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate release body from axon-dev cli/ commits
+        id: body
+        run: |
+          BODY=$(python scripts/gen_release_body.py \
+            --tag "$GITHUB_REF_NAME" \
+            --axon-dev-path /tmp/axon-dev \
+            --prev-tag-time "${{ steps.prev.outputs.t_prev }}")
+          {
+            echo "body<<RELEASE_BODY_EOF"
+            echo "$BODY"
+            echo "RELEASE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "--- Release body ---"
+          echo "$BODY"
+
+      - name: Create release with PAT (so downstream workflows fire)
+        env:
+          GH_TOKEN: ${{ secrets.AXON_DEV_READ_PAT }}
+          BODY: ${{ steps.body.outputs.body }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "$BODY"
