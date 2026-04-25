@@ -413,64 +413,340 @@ def _progress_bar(progress: float, width: int = 8) -> str:
     return "\u2588" * filled + "\u2591" * (width - filled)
 
 
-# ── Network ────────────────────────────────────────────────────────────
+# ── Network Pulse ──────────────────────────────────────────────────────
+#
+# Mirrors the webapp /network page: hero stats, recent activity, 7-day
+# submissions chart, top miners, top 5 hot tasks. Each section accepts
+# `None` to mean "API failed" and renders a graceful fallback so a single
+# down endpoint doesn't black out the whole dashboard.
 
-def print_network(data: dict) -> None:
-    """Display global network overview + per-task competition table."""
-    kv = Table(box=None, show_header=False, padding=(0, 2))
-    kv.add_column("Key", style="secondary")
-    kv.add_column("Value")
+# Activity event type → (verb label, Rich style).
+_ACTIVITY_VERBS = {
+    "improvement":          ("improved",     "result.improved"),
+    "completion":           ("completed",    "result.complete"),
+    "task_fund":            ("funded",       "accent"),
+    "task_refund":          ("refunded",     "secondary"),
+    "deposit":              ("deposited",    "money"),
+    "withdrawal_requested": ("withdrew",     "secondary"),
+}
 
-    kv.add_row("Active miners (24h)", str(data.get("active_miners_24h", 0)))
-    kv.add_row("Submissions/hr", str(data.get("submissions_1h", 0)))
-    kv.add_row("Open reward pool", f"[money]{_fmt_usdc(data.get('total_open_pool', 0))}[/]")
-    kv.add_row("Total rewards paid", f"[money]{_fmt_usdc(data.get('total_rewards_paid', 0))}[/]")
 
-    panel = Panel(kv, title=branded_title("Network Overview"), box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2))
-    console.print()
-    console.print(panel)
+def _short_addr(addr: str | None) -> str:
+    if not addr:
+        return "—"
+    return f"{addr[:6]}..{addr[-4:]}"
 
-    tasks = data.get("tasks", [])
-    if not tasks:
-        console.print("\n  [secondary]No open tasks.[/]\n")
-        return
 
-    table = Table(
-        title=branded_title("Open Tasks"),
-        box=TABLE_BOX,
-        border_style=GOLD,
-        header_style="header",
+def _fill_missing_days(data: list[dict] | None, days: int) -> list[tuple[str, int]]:
+    """Pad the daily-counts payload to `days` entries ending today, inserting
+    zero-count days for missing ones. Server omits empty days."""
+    from datetime import datetime, timezone, timedelta
+    by_day = {row.get("day"): int(row.get("count", 0)) for row in (data or [])}
+    today = datetime.now(timezone.utc).date()
+    out: list[tuple[str, int]] = []
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        key = d.isoformat()
+        out.append((key, by_day.get(key, 0)))
+    return out
+
+
+def _render_hero(stats: dict | None, network: dict | None) -> Panel:
+    """Hero strip with 4 non-overlapping-with-Home stats."""
+    if stats is None and network is None:
+        return Panel(
+            "[error]stats unavailable[/]",
+            title=branded_title("Network Pulse"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+    s = stats or {}
+    n = network or {}
+
+    grid = Table(box=None, show_header=False, padding=(0, 3))
+    for _ in range(4):
+        grid.add_column(justify="center")
+
+    grid.add_row(
+        "[secondary]24H REWARDS[/]",
+        "[secondary]24H NEW POOLS[/]",
+        "[secondary]MINERS 24H[/]",
+        "[secondary]SUBS 24H[/]",
     )
-    table.add_column("Title", max_width=26)
-    table.add_column("Pool", justify="right")
-    table.add_column("Thrs", justify="right")
-    table.add_column("Best", justify="right")
-    table.add_column("Progress")
-    table.add_column("Miners", justify="right")
-    table.add_column("Subs/hr", justify="right")
+    grid.add_row(
+        f"[money.bold]{_fmt_usdc(s.get('rewards_paid_24h', 0))}[/]",
+        f"[money.bold]{_fmt_usdc(s.get('new_pools_24h', 0))}[/]",
+        f"[brand]{n.get('active_miners_24h', 0)}[/]",
+        f"[brand]{s.get('submissions_24h', 0)}[/]",
+    )
+    return Panel(
+        grid,
+        title=branded_title("Network Pulse"),
+        box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+    )
 
-    for t in tasks:
-        pool = _fmt_usdc(t.get("pool_balance", 0))
-        threshold = f"{t.get('completion_threshold', 0):.2f}"
-        direction = t.get("direction", "minimize")
-        arrow = "↓" if direction == "minimize" else "↑"
-        best = f"{arrow}{t['best_score']:.4f}" if t.get("best_score") is not None else "-"
-        progress = t.get("progress", 0.0)
-        bar = _progress_bar(progress)
-        pct = f"{progress * 100:.0f}%"
-        table.add_row(
-            t.get("title", "?"),
-            f"[money]{pool}[/]",
-            threshold,
-            best,
-            f"{bar} {pct:>4s}",
-            str(t.get("active_miners_24h", 0)),
-            str(t.get("submissions_1h", 0)),
+
+def _render_activity(events: list | None) -> Panel:
+    if events is None:
+        return Panel(
+            "[secondary]activity feed unavailable[/]",
+            title=branded_title("Recent Activity"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+    if not events:
+        return Panel(
+            "[secondary]No recent events.[/]",
+            title=branded_title("Recent Activity"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
         )
 
+    table = Table(box=None, show_header=False, padding=(0, 1))
+    table.add_column("when", width=6, style="secondary")
+    table.add_column("actor", width=14)
+    table.add_column("verb", width=12)
+    table.add_column("target")
+    table.add_column("amt", justify="right", width=10)
+
+    for ev in events[:10]:
+        when = _time_ago(ev.get("created_at", "")) or "—"
+        actor = _short_addr(ev.get("actor_address"))
+        verb_label, verb_style = _ACTIVITY_VERBS.get(
+            ev.get("type"), (ev.get("type", "—"), "secondary"),
+        )
+
+        title = ev.get("task_title") or "—"
+        if len(title) > 26:
+            title = title[:23] + "…"
+        score = ev.get("new_score")
+        target = title + (f" → {score:.3f}" if score is not None else "")
+
+        amount_cents = ev.get("amount_cents") or 0
+        if amount_cents:
+            sign = "+" if amount_cents > 0 else "-"
+            amt = f"[money]{sign}{_fmt_usdc(abs(amount_cents))}[/]"
+        else:
+            amt = "—"
+
+        table.add_row(
+            when,
+            f"[address]{actor}[/]",
+            f"[{verb_style}]{verb_label}[/]",
+            target,
+            amt,
+        )
+
+    return Panel(
+        table,
+        title=branded_title("Recent Activity"),
+        box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+    )
+
+
+def _render_sparkline(daily: list | None, days: int = 7,
+                       width: int = 56, rows: int = 5) -> Panel:
+    """Multi-line ASCII line chart with Y-axis ticks + per-point value labels.
+
+    Width is in monospace columns inside the panel. `rows` controls vertical
+    resolution (so a value of `max` is at row 0 and `0` is at row rows-1).
+    Days with zero count are still plotted on the baseline so the chart
+    spans the whole 7-day window even on quiet weeks.
+    """
+    if daily is None:
+        return Panel(
+            "[secondary]chart unavailable[/]",
+            title=branded_title("Submissions · 7d"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+    filled = _fill_missing_days(daily, days)
+    counts = [c for _, c in filled]
+    max_v = max(counts) if counts else 0
+
+    if max_v == 0:
+        body = "[secondary]No submissions in the last 7 days.[/]"
+        return Panel(
+            body, title=branded_title("Submissions · 7d"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+
+    n = len(filled)
+    cols = [round(i * (width - 1) / max(n - 1, 1)) for i in range(n)]
+    grid: list[list[str]] = [[" "] * width for _ in range(rows)]
+    for i, (_, v) in enumerate(filled):
+        col = cols[i]
+        if v == 0:
+            row = rows - 1
+        else:
+            row = rows - 1 - round((v / max_v) * (rows - 1))
+        grid[row][col] = "●"
+
+    label_w = 3
+    lines: list[str] = []
+    for r in range(rows):
+        if r == 0:
+            tick = f"{max_v:>{label_w}}"
+        elif r == rows - 1:
+            tick = f"{0:>{label_w}}"
+        elif r == rows // 2:
+            tick = f"{max_v // 2:>{label_w}}"
+        else:
+            tick = " " * label_w
+        body_chars = "".join(grid[r])
+        # Tick separator: solid line on max/mid/0 rows, dotted otherwise
+        sep = "┤" if tick.strip() else "┊"
+        lines.append(f"  [secondary]{tick}[/] {sep} {body_chars}")
+
+    # Bottom rule + X-axis date labels (start, end)
+    lines.append(f"  {' ' * label_w} └{'─' * (width + 1)}")
+    first = filled[0][0][5:]   # MM-DD
+    last = filled[-1][0][5:]
+    pad = max(width + 2 - len(first) - len(last), 1)
+    lines.append(
+        f"  [secondary]{' ' * label_w}  {first}{' ' * pad}{last}[/]",
+    )
+
+    body_text = "\n".join(lines)
+    return Panel(
+        body_text,
+        title=branded_title("Submissions · 7d"),
+        box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+    )
+
+
+def _render_leaderboard(rows_data: list | None, window: str = "7d") -> Panel:
+    if rows_data is None:
+        return Panel(
+            "[secondary]leaderboard unavailable[/]",
+            title=branded_title(f"Top Miners · {window}"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+    if not rows_data:
+        return Panel(
+            "[secondary]No earnings yet in this window.[/]",
+            title=branded_title(f"Top Miners · {window}"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+
+    table = Table(box=None, show_header=False, padding=(0, 2))
+    table.add_column("rank", width=4)
+    table.add_column("addr", width=18)
+    table.add_column("earned", justify="right")
+    table.add_column("rewards", justify="right", style="secondary")
+
+    for r in rows_data[:5]:
+        table.add_row(
+            f"[accent]#{r.get('rank', '?')}[/]",
+            f"[address]{_short_addr(r.get('address'))}[/]",
+            f"[money]{_fmt_usdc(r.get('earned_cents', 0))}[/]",
+            f"{r.get('txn_count', 0)} reward",
+        )
+    return Panel(
+        table,
+        title=branded_title(f"Top Miners · {window}"),
+        box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+    )
+
+
+def _render_hot_tasks(network: dict | None) -> Panel:
+    """Top 5 open tasks by submissions/1h. Uses the same /api/network payload
+    that fed the old print_network table — we just slice + sort."""
+    if network is None:
+        return Panel(
+            "[secondary]tasks unavailable[/]",
+            title=branded_title("Top 5 Hot Tasks"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+
+    tasks = network.get("tasks", []) or []
+    # Drop expired-but-not-yet-flipped tasks so the heat ranking is meaningful
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    def _not_expired(t: dict) -> bool:
+        iso = t.get("expires_at")
+        if not iso:
+            return True
+        try:
+            d = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return d > now
+        except (ValueError, TypeError):
+            return True
+    open_tasks = [t for t in tasks if _not_expired(t)]
+    sorted_tasks = sorted(open_tasks,
+                          key=lambda t: t.get("submissions_1h", 0),
+                          reverse=True)[:5]
+
+    if not sorted_tasks:
+        return Panel(
+            "[secondary]No active tasks.[/]",
+            title=branded_title("Top 5 Hot Tasks"),
+            box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+        )
+
+    table = Table(box=None, show_header=False, padding=(0, 2))
+    table.add_column("rank", width=4)
+    table.add_column("title")
+    table.add_column("subs", justify="right", style="secondary")
+    table.add_column("expires", justify="right")
+    table.add_column("pool", justify="right")
+
+    for i, t in enumerate(sorted_tasks, 1):
+        title = t.get("title", "?")
+        if len(title) > 30:
+            title = title[:27] + "…"
+        table.add_row(
+            f"[accent]#{i}[/]",
+            f"[brand]{title}[/]",
+            f"{t.get('submissions_1h', 0)}/1h",
+            _fmt_time_left(t.get("expires_at", "")),
+            f"[money]{_fmt_usdc(t.get('pool_balance', 0))}[/]",
+        )
+
+    return Panel(
+        table,
+        title=branded_title("Top 5 Hot Tasks"),
+        box=PRIMARY_BOX, border_style=GOLD, padding=(1, 2),
+    )
+
+
+def print_network_pulse(
+    *,
+    stats: dict | None,
+    network: dict | None,
+    activity: list | None,
+    daily: list | None,
+    miners: list | None,
+    leaderboard_window: str = "7d",
+) -> None:
+    """Render the full Network Pulse dashboard.
+
+    Each kwarg is independent: passing None for any of them swaps in a
+    'unavailable' placeholder so a single failed endpoint doesn't black
+    out the whole page (Rich `safe_print` style)."""
     console.print()
-    console.print(table)
+    console.print(_render_hero(stats, network))
     console.print()
+    console.print(_render_activity(activity))
+    console.print()
+    console.print(_render_sparkline(daily))
+    console.print()
+    console.print(_render_leaderboard(miners, window=leaderboard_window))
+    console.print()
+    console.print(_render_hot_tasks(network))
+    console.print()
+
+
+def print_network(data: dict) -> None:
+    """Backwards-compatible single-payload entry point.
+
+    Kept for `axon.preview` and any external callers that pass the raw
+    `/api/network` response. The real dashboard lives in
+    `print_network_pulse`; this thin wrapper hands off with the other
+    inputs missing — the renderers will gracefully degrade."""
+    print_network_pulse(
+        stats=None,
+        network=data,
+        activity=None,
+        daily=None,
+        miners=None,
+    )
 
 
 # ── Stats ──────────────────────────────────────────────────────────────
