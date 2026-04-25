@@ -859,10 +859,35 @@ def deposit(tx_hash: Optional[str] = typer.Argument(None, help="On-chain tx hash
 
 @app.command()
 def network() -> None:
-    """Show global network overview — active miners, pools, per-task competition."""
-    from axon.display import print_network
-    data = _api(api_get, "/api/network", auth=False)
-    print_network(data)
+    """Network Pulse — 24h flow, recent activity, 7-day submissions, leaderboards.
+
+    Mirrors the webapp /network dashboard. Each section is fetched
+    independently so a single down endpoint doesn't black out the page —
+    its panel just shows 'unavailable' and the rest still renders.
+    """
+    from axon.display import print_network_pulse
+
+    def _safe_get(path: str):
+        # Bypass _api()'s typer.Exit-on-error wrapper: we want to keep
+        # running with `None` if any one endpoint fails.
+        try:
+            return api_get(path, auth=False)
+        except Exception:
+            return None
+
+    stats = _safe_get("/stats")
+    network_data = _safe_get("/api/network")
+    activity = _safe_get("/api/activity/recent?limit=10")
+    daily = _safe_get("/api/stats/submissions-daily?days=7")
+    miners = _safe_get("/api/leaderboard/miners?window=7d")
+
+    print_network_pulse(
+        stats=stats,
+        network=network_data,
+        activity=activity,
+        daily=daily,
+        miners=miners,
+    )
 
 
 # --- Stats ---

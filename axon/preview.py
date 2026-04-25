@@ -3,7 +3,7 @@ from axon.theme import console, branded_title
 from axon.display import (
     print_banner, print_task_list, print_task_detail,
     print_mining_summary, build_mining_panel,
-    print_network, print_stats,
+    print_network_pulse, print_stats,
 )
 
 
@@ -75,21 +75,61 @@ def main() -> None:
     )
     console.print(panel)
 
-    # Network
-    print_network({
-        "active_miners_24h": 42,
-        "submissions_1h": 128,
-        "total_open_pool": 250000,
-        "total_rewards_paid": 1500000,
-        "tasks": [
-            {"title": "Summarize Wikipedia", "pool_balance": 50000,
-             "completion_threshold": 0.95, "best_score": 0.8712,
-             "progress": 0.917, "active_miners_24h": 18, "submissions_1h": 56},
-            {"title": "Translate EN→FR", "pool_balance": 100000,
-             "completion_threshold": 0.90, "best_score": 0.7800,
-             "progress": 0.867, "active_miners_24h": 24, "submissions_1h": 72},
+    # Network Pulse — full dashboard with every section populated
+    from datetime import datetime, timezone, timedelta
+    far_future = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    print_network_pulse(
+        stats={
+            "rewards_paid_24h": 4500,
+            "new_pools_24h": 25000,
+            "submissions_24h": 47,
+        },
+        network={
+            "active_miners_24h": 42,
+            "submissions_1h": 128,
+            "tasks": [
+                {"id": "a", "title": "Summarize Wikipedia",
+                 "pool_balance": 50000, "submissions_1h": 56,
+                 "expires_at": far_future},
+                {"id": "b", "title": "Translate EN→FR",
+                 "pool_balance": 100000, "submissions_1h": 72,
+                 "expires_at": far_future},
+                {"id": "c", "title": "Fast Fibonacci — fib(40) under 1ms",
+                 "pool_balance": 1000, "submissions_1h": 18,
+                 "expires_at": far_future},
+            ],
+        },
+        activity=[
+            {"id": "sub:1", "type": "completion", "created_at": (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(),
+             "actor_address": "0xd856257658c76ffb237f62bc5cd7109327b7a066",
+             "task_id": "a", "task_title": "Summarize Wikipedia",
+             "amount_cents": 500, "new_score": 0.95},
+            {"id": "sub:2", "type": "improvement", "created_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+             "actor_address": "0xabc123def456abc123def456abc123def4561234",
+             "task_id": "b", "task_title": "Translate EN→FR",
+             "amount_cents": 12, "new_score": 0.85},
+            {"id": "txn:1", "type": "task_fund", "created_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+             "actor_address": "0x111aaabbb222ccc333ddd444eee555fff6667777",
+             "task_id": "c", "task_title": "Fast Fibonacci",
+             "amount_cents": -1000, "new_score": None},
+            {"id": "txn:2", "type": "deposit", "created_at": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+             "actor_address": "0x222bbbccc333ddd444eee555fff666777aaa8888",
+             "task_id": None, "task_title": None,
+             "amount_cents": 100000, "new_score": None},
         ],
-    })
+        daily=[
+            {"day": (datetime.now(timezone.utc).date() - timedelta(days=6)).isoformat(), "count": 7},
+            {"day": (datetime.now(timezone.utc).date() - timedelta(days=5)).isoformat(), "count": 11},
+            {"day": (datetime.now(timezone.utc).date() - timedelta(days=4)).isoformat(), "count": 7},
+            {"day": (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat(), "count": 21},
+            {"day": datetime.now(timezone.utc).date().isoformat(), "count": 14},
+        ],
+        miners=[
+            {"rank": 1, "address": "0xd856257658c76ffb237f62bc5cd7109327b7a066", "earned_cents": 24500, "txn_count": 12},
+            {"rank": 2, "address": "0xabc123def456abc123def456abc123def4561234", "earned_cents": 18200, "txn_count": 9},
+            {"rank": 3, "address": "0x111aaabbb222ccc333ddd444eee555fff6667777", "earned_cents": 7800, "txn_count": 4},
+        ],
+    )
 
     # Stats
     print_stats(
