@@ -6,6 +6,11 @@ on:
 
 jobs:
   trigger:
+    # Skip when the release body is empty — auto-release.yml emits "" if
+    # axon-dev had no cli/ commits in the window, in which case marketing
+    # would otherwise fall back to axon-cli git log (only chore syncs +
+    # ci commits, never useful).
+    if: ${{ github.event.release.body != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger axon-marketing tweet workflow
