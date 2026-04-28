@@ -29,7 +29,7 @@ jobs:
 
       - name: Clone axon-dev (private, read-only)
         env:
-          AXON_DEV_PAT: ${{ secrets.AXON_DEV_READ_PAT }}
+          AXON_DEV_PAT: ${{ secrets.MARKETING_PAT }}
         run: |
           git clone "https://x-access-token:${AXON_DEV_PAT}@github.com/Axon-Work/axon-dev.git" /tmp/axon-dev
 
@@ -54,7 +54,7 @@ jobs:
 
       - name: Create release with PAT (so downstream workflows fire)
         env:
-          GH_TOKEN: ${{ secrets.AXON_DEV_READ_PAT }}
+          GH_TOKEN: ${{ secrets.MARKETING_PAT }}
           BODY: ${{ steps.body.outputs.body }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
